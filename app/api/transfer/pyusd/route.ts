@@ -10,7 +10,7 @@ const PYUSD_ABI = [
 ];
 
 // PYUSD contract address on Arbitrum Sepolia testnet
-const PYUSD_CONTRACT_ADDRESS = '0x0000000000000000000000000000000000000000'; // Replace with actual PYUSD testnet address
+const PYUSD_CONTRACT_ADDRESS = '0x637A1259C6afd7E3AdF63993cA7E58BB438aB1B1';
 
 export async function POST(request: Request) {
   try {
