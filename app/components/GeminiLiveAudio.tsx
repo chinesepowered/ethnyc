@@ -76,9 +76,11 @@ export default function GeminiLiveAudio() {
             setIsConnected(true);
           },
           onmessage: async (message: LiveServerMessage) => {
+            console.log('Received message:', message);
             const audio = message.serverContent?.modelTurn?.parts[0]?.inlineData;
 
             if (audio && outputAudioContextRef.current) {
+              console.log('Processing audio response');
               nextStartTimeRef.current = Math.max(
                 nextStartTimeRef.current,
                 outputAudioContextRef.current.currentTime,
@@ -179,7 +181,12 @@ export default function GeminiLiveAudio() {
           const pcmData = inputBuffer.getChannelData(0);
 
           if (sessionRef.current) {
-            sessionRef.current.sendRealtimeInput({ media: createBlob(pcmData) });
+            console.log('Sending audio chunk, size:', pcmData.length, 'max amplitude:', Math.max(...pcmData.map(Math.abs)));
+            try {
+              sessionRef.current.sendRealtimeInput({ media: createBlob(pcmData) });
+            } catch (err) {
+              console.error('Error sending audio:', err);
+            }
           }
         };
 
