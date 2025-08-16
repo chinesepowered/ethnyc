@@ -15,8 +15,8 @@ export default function GeminiLiveAudio() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [textInput, setTextInput] = useState('');
   const [wakeWordDetected, setWakeWordDetected] = useState(false);
-  const [pendingPurchase, setPendingPurchase] = useState<any>(null);
-  const [awaitingConfirmation, setAwaitingConfirmation] = useState(false);
+  const [transactionResult, setTransactionResult] = useState<any>(null);
+  const [showTransactionUI, setShowTransactionUI] = useState(false);
 
   const clientRef = useRef<GoogleGenAI | null>(null);
   const sessionRef = useRef<Session | null>(null);
@@ -138,50 +138,103 @@ export default function GeminiLiveAudio() {
                       break;
                       
                     case 'purchase_item':
-                      setPendingPurchase(functionCall.args);
-                      setAwaitingConfirmation(true);
-                      response = {
-                        status: 'awaiting_voice_confirmation',
-                        message: `Ready to purchase ${functionCall.args?.item_name} for ${functionCall.args?.price} ${functionCall.args?.currency} from ${functionCall.args?.vendor}. Say YES to confirm or NO to cancel.`
-                      };
-                      break;
+                      // Directly process the purchase without confirmation
+                      const purchaseArgs = functionCall.args;
+                      const endpoint = purchaseArgs?.currency === 'FLOW' 
+                        ? '/api/transfer/flow' 
+                        : '/api/transfer/pyusd';
                       
-                    case 'confirm_purchase':
-                      if (!pendingPurchase) {
-                        response = { error: 'No pending purchase to confirm' };
-                        break;
-                      }
-                      
-                      if (functionCall.args?.confirmed) {
-                        // Process the purchase
-                        const endpoint = pendingPurchase.currency === 'FLOW' 
-                          ? '/api/transfer/flow' 
-                          : '/api/transfer/pyusd';
+                      try {
+                        console.log(`Processing purchase: ${purchaseArgs?.item_name} for ${purchaseArgs?.price} ${purchaseArgs?.currency}`);
                         
-                        try {
-                          const transferResponse = await fetch(endpoint, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                              amount: pendingPurchase.price,
-                              recipient: pendingPurchase.vendor,
-                              currency: pendingPurchase.currency
-                            })
+                        const transferResponse = await fetch(endpoint, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            amount: purchaseArgs?.price,
+                            recipient: purchaseArgs?.vendor,
+                            currency: purchaseArgs?.currency
+                          })
+                        });
+                        
+                        const result = await transferResponse.json();
+                        
+                        if (result.success) {
+                          // Show success UI
+                          setTransactionResult({
+                            success: true,
+                            item_name: purchaseArgs?.item_name,
+                            price: purchaseArgs?.price,
+                            currency: purchaseArgs?.currency,
+                            vendor: purchaseArgs?.vendor,
+                            transactionHash: result.transactionHash || result.transactionId,
+                            ensName: result.ensName
                           });
+                          setShowTransactionUI(true);
                           
-                          const result = await transferResponse.json();
-                          response = result.success 
-                            ? { success: true, message: `Purchase complete! Sent ${pendingPurchase.price} ${pendingPurchase.currency} to ${pendingPurchase.vendor}` }
-                            : { error: result.error };
-                        } catch (error) {
-                          response = { error: 'Transfer failed' };
+                          // Auto-hide after 5 seconds
+                          setTimeout(() => {
+                            setShowTransactionUI(false);
+                            setTransactionResult(null);
+                          }, 5000);
+                          
+                          response = { 
+                            success: true, 
+                            message: `Purchase complete! Sent ${purchaseArgs?.price} ${purchaseArgs?.currency} to ${purchaseArgs?.vendor}`,
+                            transactionHash: result.transactionHash || result.transactionId,
+                            ensName: result.ensName
+                          };
+                        } else {
+                          // Show error UI
+                          setTransactionResult({
+                            success: false,
+                            item_name: purchaseArgs?.item_name,
+                            price: purchaseArgs?.price,
+                            currency: purchaseArgs?.currency,
+                            vendor: purchaseArgs?.vendor,
+                            error: result.error || 'Transfer failed',
+                            details: result.details
+                          });
+                          setShowTransactionUI(true);
+                          
+                          // Auto-hide after 5 seconds
+                          setTimeout(() => {
+                            setShowTransactionUI(false);
+                            setTransactionResult(null);
+                          }, 5000);
+                          
+                          response = { 
+                            error: result.error || 'Transfer failed',
+                            details: result.details
+                          };
                         }
-                      } else {
-                        response = { message: 'Purchase cancelled' };
+                      } catch (error) {
+                        console.error('Purchase error:', error);
+                        
+                        // Show error UI
+                        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+                        setTransactionResult({
+                          success: false,
+                          item_name: purchaseArgs?.item_name,
+                          price: purchaseArgs?.price,
+                          currency: purchaseArgs?.currency,
+                          vendor: purchaseArgs?.vendor,
+                          error: 'Transfer failed',
+                          details: errorMessage
+                        });
+                        setShowTransactionUI(true);
+                        
+                        // Auto-hide after 5 seconds
+                        setTimeout(() => {
+                          setShowTransactionUI(false);
+                          setTransactionResult(null);
+                        }, 5000);
+                        
+                        response = { 
+                          error: 'Transfer failed',
+                          details: errorMessage
+                        };
                       }
-                      
-                      setPendingPurchase(null);
-                      setAwaitingConfirmation(false);
                       break;
                       
                     case 'emergency_help':
@@ -283,16 +336,15 @@ export default function GeminiLiveAudio() {
           2. SHOPPING: When user asks about pricing or buying something visible, identify it and look up pricing.
           3. INVENTORY: When user asks what's available, use list_items to show all store items.
           4. EMERGENCY: If user says "help" or appears distressed, immediately call emergency_help.
-          5. PURCHASES: When user wants to buy something:
+          5. PURCHASES: When user clearly expresses intent to buy something:
              - Identify the object (or use item from list)
              - State the price and vendor
-             - Call purchase_item to set up the purchase
-             - Ask user to say "yes" to confirm or "no" to cancel
-             - When you receive confirmation, call confirm_purchase with their response
+             - Immediately call purchase_item to process the payment
+             - Announce the transaction result
           
           AVAILABLE ITEMS include: Coke/Coca Cola cans, Pepsi, Sprite, various chargers, water bottles, energy drinks, and Flow NFTs.
           
-          BE CONCISE and HELPFUL. Always use voice confirmation for purchases.`,
+          BE CONCISE and HELPFUL. Process purchases immediately when user clearly wants to buy.`,
           tools: [{
             functionDeclarations: [
               {
@@ -319,7 +371,7 @@ export default function GeminiLiveAudio() {
               },
               {
                 name: 'purchase_item',
-                description: 'Set up a purchase for confirmation',
+                description: 'Process a purchase immediately when user wants to buy an item',
                 parameters: {
                   type: 'object',
                   properties: {
@@ -341,20 +393,6 @@ export default function GeminiLiveAudio() {
                     }
                   },
                   required: ['vendor', 'item_name', 'price', 'currency']
-                }
-              },
-              {
-                name: 'confirm_purchase',
-                description: 'Confirm or cancel a pending purchase based on user voice response',
-                parameters: {
-                  type: 'object',
-                  properties: {
-                    confirmed: {
-                      type: 'boolean',
-                      description: 'True if user said yes/confirmed, false if user said no/cancelled'
-                    }
-                  },
-                  required: ['confirmed']
                 }
               },
               {
@@ -781,31 +819,53 @@ export default function GeminiLiveAudio() {
         </div>
       </div>
 
-      {/* Purchase Confirmation Indicator */}
-      {awaitingConfirmation && pendingPurchase && (
+      {/* Transaction Result Indicator */}
+      {showTransactionUI && transactionResult && (
         <div className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-50">
-          <div className="bg-slate-800/95 border-2 border-yellow-500/50 rounded-2xl p-8 max-w-md backdrop-blur-sm shadow-2xl">
+          <div className={`bg-slate-800/95 border-2 ${transactionResult.success ? 'border-green-500/50' : 'border-red-500/50'} rounded-2xl p-8 max-w-md backdrop-blur-sm shadow-2xl`}>
             <div className="flex flex-col items-center space-y-4">
-              <div className="w-16 h-16 rounded-full bg-yellow-500/20 flex items-center justify-center animate-pulse">
-                <svg className="w-8 h-8 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
+              <div className={`w-16 h-16 rounded-full ${transactionResult.success ? 'bg-green-500/20' : 'bg-red-500/20'} flex items-center justify-center`}>
+                {transactionResult.success ? (
+                  <svg className="w-8 h-8 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                ) : (
+                  <svg className="w-8 h-8 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                )}
               </div>
-              <h3 className="text-xl font-bold text-white">Awaiting Voice Confirmation</h3>
+              <h3 className="text-xl font-bold text-white">
+                {transactionResult.success ? 'Purchase Complete!' : 'Purchase Failed'}
+              </h3>
               <div className="text-center space-y-2">
                 <p className="text-slate-300">
-                  <span className="font-medium text-white">{pendingPurchase.item_name}</span>
+                  <span className="font-medium text-white">{transactionResult.item_name}</span>
                 </p>
                 <p className="text-slate-300">
-                  <span className="text-2xl font-bold text-yellow-400">
-                    {pendingPurchase.price} {pendingPurchase.currency}
+                  <span className={`text-2xl font-bold ${transactionResult.success ? 'text-green-400' : 'text-red-400'}`}>
+                    {transactionResult.price} {transactionResult.currency}
                   </span>
                 </p>
-                <p className="text-slate-400 text-sm">from {pendingPurchase.vendor}</p>
+                <p className="text-slate-400 text-sm">
+                  {transactionResult.success ? `Sent to ${transactionResult.vendor}` : transactionResult.error}
+                </p>
               </div>
-              <div className="mt-4 p-4 bg-slate-900/50 rounded-lg">
-                <p className="text-green-400 font-medium">Say "YES" to confirm</p>
-                <p className="text-red-400 font-medium">Say "NO" to cancel</p>
+              {transactionResult.success && transactionResult.transactionHash && (
+                <div className="mt-4 p-3 bg-slate-900/50 rounded-lg w-full">
+                  <p className="text-xs text-slate-400 mb-1">Transaction ID:</p>
+                  <p className="text-xs text-slate-300 font-mono break-all">
+                    {transactionResult.transactionHash.substring(0, 20)}...
+                  </p>
+                </div>
+              )}
+              {!transactionResult.success && transactionResult.details && (
+                <div className="mt-4 p-3 bg-slate-900/50 rounded-lg w-full">
+                  <p className="text-xs text-red-400">{transactionResult.details}</p>
+                </div>
+              )}
+              <div className="text-xs text-slate-500 animate-pulse">
+                Auto-closing in 5 seconds...
               </div>
             </div>
           </div>
