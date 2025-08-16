@@ -73,13 +73,32 @@ export async function POST(request: Request) {
     const tx = await pyusdContract.transfer(recipientData.pyusdAddress, amountInUnits);
     const receipt = await tx.wait();
     
+    // Try to resolve ENS name for the recipient address
+    let ensName = null;
+    try {
+      const ensResponse = await fetch(`${process.env.NEXT_PUBLIC_URL || 'http://localhost:3000'}/api/ens/resolve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          address: recipientData.pyusdAddress,
+          chainId: 421614 // Arbitrum Sepolia
+        })
+      });
+      const ensData = await ensResponse.json();
+      if (ensData.success) {
+        ensName = ensData.ensName;
+      }
+    } catch (error) {
+      console.log('ENS resolution failed, continuing without ENS name');
+    }
+    
     return NextResponse.json({
       success: true,
       message: `Successfully transferred ${amount} PYUSD to ${recipient}`,
       transactionHash: receipt.hash,
       blockNumber: receipt.blockNumber,
       recipient: recipientData.pyusdAddress,
-      ensName: recipientData.ensName
+      ensName: ensName
     });
     
   } catch (error: any) {

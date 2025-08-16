@@ -14,6 +14,9 @@ export default function GeminiLiveAudio() {
   const [audioLevel, setAudioLevel] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [textInput, setTextInput] = useState('');
+  const [wakeWordDetected, setWakeWordDetected] = useState(false);
+  const [pendingPurchase, setPendingPurchase] = useState<any>(null);
+  const [awaitingConfirmation, setAwaitingConfirmation] = useState(false);
 
   const clientRef = useRef<GoogleGenAI | null>(null);
   const sessionRef = useRef<Session | null>(null);
@@ -97,18 +100,121 @@ export default function GeminiLiveAudio() {
               
               if (toolCall.functionCalls) {
                 for (const functionCall of toolCall.functionCalls) {
-                  if (functionCall.name === 'transfer_flow') {
-                    console.log('Transfer flow called with amount:', functionCall.args?.amount);
-                    // TODO: Implement actual transfer logic
-                    
-                    if (sessionRef.current) {
-                      sessionRef.current.sendToolResponse({
-                        functionResponses: [{
-                          name: 'transfer_flow',
-                          response: { success: true, message: 'Transfer initiated' }
-                        }]
+                  let response: any = {};
+                  
+                  switch (functionCall.name) {
+                    case 'lookup_item':
+                      const description = functionCall.args?.description;
+                      // Import store data dynamically
+                      const { findItemByDescription } = await import('../data/store');
+                      const item = findItemByDescription(description);
+                      
+                      if (item) {
+                        response = {
+                          found: true,
+                          vendor: item.vendor,
+                          name: item.name,
+                          price: item.price,
+                          currency: item.currency
+                        };
+                      } else {
+                        response = { found: false, message: 'Item not found in inventory' };
+                      }
+                      break;
+                      
+                    case 'list_items':
+                      // Import store data dynamically
+                      const { getAllItems } = await import('../data/store');
+                      const allItems = getAllItems();
+                      response = {
+                        items: allItems.map(item => ({
+                          name: item.name,
+                          vendor: item.vendor,
+                          price: item.price,
+                          currency: item.currency
+                        })),
+                        total: allItems.length
+                      };
+                      break;
+                      
+                    case 'purchase_item':
+                      setPendingPurchase(functionCall.args);
+                      setAwaitingConfirmation(true);
+                      response = {
+                        status: 'awaiting_voice_confirmation',
+                        message: `Ready to purchase ${functionCall.args?.item_name} for ${functionCall.args?.price} ${functionCall.args?.currency} from ${functionCall.args?.vendor}. Say YES to confirm or NO to cancel.`
+                      };
+                      break;
+                      
+                    case 'confirm_purchase':
+                      if (!pendingPurchase) {
+                        response = { error: 'No pending purchase to confirm' };
+                        break;
+                      }
+                      
+                      if (functionCall.args?.confirmed) {
+                        // Process the purchase
+                        const endpoint = pendingPurchase.currency === 'FLOW' 
+                          ? '/api/transfer/flow' 
+                          : '/api/transfer/pyusd';
+                        
+                        try {
+                          const transferResponse = await fetch(endpoint, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              amount: pendingPurchase.price,
+                              recipient: pendingPurchase.vendor,
+                              currency: pendingPurchase.currency
+                            })
+                          });
+                          
+                          const result = await transferResponse.json();
+                          response = result.success 
+                            ? { success: true, message: `Purchase complete! Sent ${pendingPurchase.price} ${pendingPurchase.currency} to ${pendingPurchase.vendor}` }
+                            : { error: result.error };
+                        } catch (error) {
+                          response = { error: 'Transfer failed' };
+                        }
+                      } else {
+                        response = { message: 'Purchase cancelled' };
+                      }
+                      
+                      setPendingPurchase(null);
+                      setAwaitingConfirmation(false);
+                      break;
+                      
+                    case 'emergency_help':
+                      console.log('EMERGENCY HELP CALLED:', functionCall.args?.reason);
+                      // Call emergency endpoint
+                      fetch('/api/emergency', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ reason: functionCall.args?.reason })
                       });
-                    }
+                      response = { status: 'emergency_called', message: 'Emergency services notified' };
+                      break;
+                      
+                    case 'transfer_flow':
+                      console.log('Transfer flow called:', functionCall.args);
+                      // Call Flow transfer API
+                      const transferResponse = await fetch('/api/transfer/flow', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(functionCall.args)
+                      });
+                      response = await transferResponse.json();
+                      break;
+                  }
+                  
+                  if (sessionRef.current) {
+                    sessionRef.current.sendToolResponse({
+                      functionResponses: [{
+                        id: functionCall.id || functionCall.name,
+                        name: functionCall.name,
+                        response
+                      }]
+                    });
                   }
                 }
               }
@@ -168,22 +274,122 @@ export default function GeminiLiveAudio() {
         },
         config: {
           responseModalities: [Modality.AUDIO, Modality.VIDEO],
-          systemInstruction: 'You are a helpful AI assistant that can see and hear.',
+          systemInstruction: `You are Vitalik, an AI shopping assistant with visual recognition capabilities.
+          
+          WAKE WORD: You only respond to commands that start with "okay vitalik" or "hey vitalik".
+          
+          CAPABILITIES:
+          1. OBJECT RECOGNITION: You can see through the camera and identify objects like sodas, chargers, bottles, etc.
+          2. SHOPPING: When user asks about pricing or buying something visible, identify it and look up pricing.
+          3. INVENTORY: When user asks what's available, use list_items to show all store items.
+          4. EMERGENCY: If user says "help" or appears distressed, immediately call emergency_help.
+          5. PURCHASES: When user wants to buy something:
+             - Identify the object (or use item from list)
+             - State the price and vendor
+             - Call purchase_item to set up the purchase
+             - Ask user to say "yes" to confirm or "no" to cancel
+             - When you receive confirmation, call confirm_purchase with their response
+          
+          AVAILABLE ITEMS include: Coke/Coca Cola cans, Pepsi, Sprite, various chargers, water bottles, energy drinks, and Flow NFTs.
+          
+          BE CONCISE and HELPFUL. Always use voice confirmation for purchases.`,
           tools: [{
-            functionDeclarations: [{
-              name: 'transfer_flow',
-              description: 'Transfer Flow tokens to another address',
-              parameters: {
-                type: 'object',
-                properties: {
-                  amount: {
-                    type: 'number',
-                    description: 'Amount of Flow tokens to transfer'
-                  }
-                },
-                required: ['amount']
+            functionDeclarations: [
+              {
+                name: 'lookup_item',
+                description: 'Look up an item in the store inventory based on what is visible',
+                parameters: {
+                  type: 'object',
+                  properties: {
+                    description: {
+                      type: 'string',
+                      description: 'Description of the visible item (e.g., "coca cola can", "usb charger")'
+                    }
+                  },
+                  required: ['description']
+                }
+              },
+              {
+                name: 'list_items',
+                description: 'List all available items in the store inventory',
+                parameters: {
+                  type: 'object',
+                  properties: {}
+                }
+              },
+              {
+                name: 'purchase_item',
+                description: 'Set up a purchase for confirmation',
+                parameters: {
+                  type: 'object',
+                  properties: {
+                    vendor: {
+                      type: 'string',
+                      description: 'Vendor name'
+                    },
+                    item_name: {
+                      type: 'string',
+                      description: 'Item name'
+                    },
+                    price: {
+                      type: 'number',
+                      description: 'Price of the item'
+                    },
+                    currency: {
+                      type: 'string',
+                      description: 'Currency (PYUSD or FLOW)'
+                    }
+                  },
+                  required: ['vendor', 'item_name', 'price', 'currency']
+                }
+              },
+              {
+                name: 'confirm_purchase',
+                description: 'Confirm or cancel a pending purchase based on user voice response',
+                parameters: {
+                  type: 'object',
+                  properties: {
+                    confirmed: {
+                      type: 'boolean',
+                      description: 'True if user said yes/confirmed, false if user said no/cancelled'
+                    }
+                  },
+                  required: ['confirmed']
+                }
+              },
+              {
+                name: 'emergency_help',
+                description: 'Call for emergency help when user is in distress',
+                parameters: {
+                  type: 'object',
+                  properties: {
+                    reason: {
+                      type: 'string',
+                      description: 'Reason for emergency'
+                    }
+                  },
+                  required: ['reason']
+                }
+              },
+              {
+                name: 'transfer_flow',
+                description: 'Transfer Flow tokens to another address',
+                parameters: {
+                  type: 'object',
+                  properties: {
+                    amount: {
+                      type: 'number',
+                      description: 'Amount of Flow tokens to transfer'
+                    },
+                    recipient: {
+                      type: 'string',
+                      description: 'Recipient vendor name'
+                    }
+                  },
+                  required: ['amount', 'recipient']
+                }
               }
-            }]
+            ]
           }],
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Orus' } },
@@ -574,6 +780,37 @@ export default function GeminiLiveAudio() {
           )}
         </div>
       </div>
+
+      {/* Purchase Confirmation Indicator */}
+      {awaitingConfirmation && pendingPurchase && (
+        <div className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-50">
+          <div className="bg-slate-800/95 border-2 border-yellow-500/50 rounded-2xl p-8 max-w-md backdrop-blur-sm shadow-2xl">
+            <div className="flex flex-col items-center space-y-4">
+              <div className="w-16 h-16 rounded-full bg-yellow-500/20 flex items-center justify-center animate-pulse">
+                <svg className="w-8 h-8 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <h3 className="text-xl font-bold text-white">Awaiting Voice Confirmation</h3>
+              <div className="text-center space-y-2">
+                <p className="text-slate-300">
+                  <span className="font-medium text-white">{pendingPurchase.item_name}</span>
+                </p>
+                <p className="text-slate-300">
+                  <span className="text-2xl font-bold text-yellow-400">
+                    {pendingPurchase.price} {pendingPurchase.currency}
+                  </span>
+                </p>
+                <p className="text-slate-400 text-sm">from {pendingPurchase.vendor}</p>
+              </div>
+              <div className="mt-4 p-4 bg-slate-900/50 rounded-lg">
+                <p className="text-green-400 font-medium">Say "YES" to confirm</p>
+                <p className="text-red-400 font-medium">Say "NO" to cancel</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Hidden canvas for video capture */}
       <canvas ref={canvasRef} className="hidden" />

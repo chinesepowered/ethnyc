@@ -21,7 +21,7 @@ importers:
         specifier: ^1.10.0
         version: 1.10.0
       ethers:
-        specifier: ^6.15.0
+        specifier: '6'
         version: 6.15.0
       lit:
         specifier: ^3.3.1

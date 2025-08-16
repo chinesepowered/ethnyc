@@ -41,12 +41,32 @@ export async function POST(request: Request) {
     // Simulated response for demo
     const mockTxId = '0x' + Math.random().toString(16).substring(2, 18);
     
+    // Try to resolve ENS name for the recipient address (if they have one)
+    let ensName = null;
+    try {
+      // Note: Flow addresses don't have ENS directly, but we could check if the vendor has an associated Ethereum address
+      const ensResponse = await fetch(`${process.env.NEXT_PUBLIC_URL || 'http://localhost:3000'}/api/ens/resolve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          address: recipientData.pyusdAddress, // Use PYUSD address for ENS lookup
+          chainId: 421614 // Arbitrum Sepolia
+        })
+      });
+      const ensData = await ensResponse.json();
+      if (ensData.success) {
+        ensName = ensData.ensName;
+      }
+    } catch (error) {
+      console.log('ENS resolution failed, continuing without ENS name');
+    }
+    
     return NextResponse.json({
       success: true,
       message: `Successfully transferred ${amount} FLOW to ${recipient}`,
       transactionId: mockTxId,
       recipient: recipientData.flowAddress,
-      ensName: recipientData.ensName,
+      ensName: ensName,
       // In production, would include actual Flow transaction details
       note: 'Demo mode - actual Flow transfer not implemented'
     });
