@@ -1,10 +1,8 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
-*/
-/**
- * Analyser class for live audio visualisation.
  */
+
 export class Analyser {
   private analyser: AnalyserNode;
   private bufferLength = 0;
