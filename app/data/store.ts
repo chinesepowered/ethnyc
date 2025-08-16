@@ -1,15 +1,15 @@
 // Hardcoded store inventory
 export const storeInventory = [
-  { vendor: 'Amazon', name: 'Coca Cola Can', price: 2.50, currency: 'PYUSD' },
-  { vendor: 'Amazon', name: 'Coke Can', price: 2.50, currency: 'PYUSD' }, // Alias for Coca Cola
-  { vendor: 'Amazon', name: 'Pepsi Can', price: 2.50, currency: 'PYUSD' },
-  { vendor: 'Amazon', name: 'Sprite Can', price: 2.50, currency: 'PYUSD' },
-  { vendor: 'BestBuy', name: 'USB-C Charger', price: 29.99, currency: 'PYUSD' },
-  { vendor: 'BestBuy', name: 'iPhone Charger', price: 24.99, currency: 'PYUSD' },
-  { vendor: 'BestBuy', name: 'Laptop Charger', price: 89.99, currency: 'PYUSD' },
-  { vendor: 'Walmart', name: 'Water Bottle', price: 1.99, currency: 'PYUSD' },
-  { vendor: 'Walmart', name: 'Energy Drink', price: 3.99, currency: 'PYUSD' },
-  { vendor: 'FlowStore', name: 'Flow NFT Pack', price: 10.0, currency: 'FLOW' },
+  { vendor: 'Amazon', name: 'Coca Cola Can', price: 1.00, currency: 'PYUSD' },
+  { vendor: 'Amazon', name: 'Coke Can', price: 1.00, currency: 'PYUSD' }, // Alias for Coca Cola
+  { vendor: 'Amazon', name: 'Pepsi Can', price: 1.00, currency: 'PYUSD' },
+  { vendor: 'Amazon', name: 'Sprite Can', price: 1.00, currency: 'PYUSD' },
+  { vendor: 'BestBuy', name: 'USB-C Charger', price: 5.00, currency: 'PYUSD' },
+  { vendor: 'BestBuy', name: 'Phone Charger', price: 2.00, currency: 'FLOW' },
+  { vendor: 'BestBuy', name: 'Laptop Charger', price: 8.00, currency: 'PYUSD' },
+  { vendor: 'Walmart', name: 'Water Bottle', price: 5.00, currency: 'PYUSD' },
+  { vendor: 'Walmart', name: 'Energy Drink', price: 2.00, currency: 'PYUSD' },
+  { vendor: 'FlowStore', name: 'Flow NFT Pack', price: 5.0, currency: 'FLOW' },
   { vendor: 'FlowStore', name: 'Flow Collectible', price: 5.0, currency: 'FLOW' },
 ];
 
@@ -17,23 +17,23 @@ export const storeInventory = [
 export const authorizedRecipients = [
   { 
     name: 'Amazon', 
-    pyusdAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb4',
-    flowAddress: '0x1234567890abcdef'
+    pyusdAddress: '0x257b2457b10c02d393458393515f51dc8880300d',
+    flowAddress: '0xecb8d6f1b3a8639f'
   },
   { 
     name: 'BestBuy', 
-    pyusdAddress: '0x5aAeb6053f3E94C9b9A09f33669435E7Ef1BeAed',
-    flowAddress: '0xfedcba0987654321'
+    pyusdAddress: '0x257b2457b10c02d393458393515f51dc8880300d',
+    flowAddress: '0xecb8d6f1b3a8639f'
   },
   { 
     name: 'Walmart', 
-    pyusdAddress: '0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359',
-    flowAddress: '0xabcdef1234567890'
+    pyusdAddress: '0x257b2457b10c02d393458393515f51dc8880300d',
+    flowAddress: '0xecb8d6f1b3a8639f'
   },
   { 
     name: 'FlowStore', 
-    pyusdAddress: '0xdbF03B407c01E7cD3CBea99509d93f8DDDC8C6FB',
-    flowAddress: '0x9876543210fedcba'
+    pyusdAddress: '0x257b2457b10c02d393458393515f51dc8880300d',
+    flowAddress: '0xecb8d6f1b3a8639f'
   },
 ];
 
