@@ -8,13 +8,15 @@ import {GoogleGenAI, LiveServerMessage, Modality, Session} from '@google/genai';
 import {LitElement, css, html} from 'lit';
 import {customElement, state} from 'lit/decorators.js';
 import {createBlob, decode, decodeAudioData} from './utils';
-import './visual-3d';
+import dynamic from 'next/dynamic';
+
+const GdmLiveAudioVisuals3D = dynamic(() => import('./visual-3d').then(mod => mod.GdmLiveAudioVisuals3D as any), { ssr: false });
 
 @customElement('gdm-live-audio')
 export class GdmLiveAudio extends LitElement {
-  @state() isRecording = false;
-  @state() status = '';
-  @state() error = '';
+  @state() isRecording: boolean = false;
+  @state() status: string = '';
+  @state() error: string = '';
 
   private client: GoogleGenAI;
   private session: Session;
@@ -22,8 +24,8 @@ export class GdmLiveAudio extends LitElement {
     window.webkitAudioContext)({sampleRate: 16000});
   private outputAudioContext = new (window.AudioContext ||
     window.webkitAudioContext)({sampleRate: 24000});
-  @state() inputNode = this.inputAudioContext.createGain();
-  @state() outputNode = this.outputAudioContext.createGain();
+  @state() inputNode: GainNode = this.inputAudioContext.createGain();
+  @state() outputNode: GainNode = this.outputAudioContext.createGain();
   private nextStartTime = 0;
   private mediaStream: MediaStream;
   private sourceNode: AudioBufferSourceNode;
@@ -89,7 +91,7 @@ export class GdmLiveAudio extends LitElement {
     this.initAudio();
 
     this.client = new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY,
+      apiKey: process.env.NEXT_PUBLIC_GEMINI_API_KEY,
     });
 
     this.outputNode.connect(this.outputAudioContext.destination);
@@ -299,9 +301,9 @@ export class GdmLiveAudio extends LitElement {
         </div>
 
         <div id="status"> ${this.error} </div>
-        <gdm-live-audio-visuals-3d
+        <GdmLiveAudioVisuals3D
           .inputNode=${this.inputNode}
-          .outputNode=${this.outputNode}></gdm-live-audio-visuals-3d>
+          .outputNode=${this.outputNode}></GdmLiveAudioVisuals3D>
       </div>
     `;
   }
