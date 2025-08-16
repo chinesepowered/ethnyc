@@ -58,7 +58,7 @@ export default function GeminiLiveAudio() {
   const initSession = async () => {
     if (!clientRef.current) return;
 
-    const model = 'gemini-2.5-flash-preview-native-audio-dialog';
+    const model = 'gemini-live-2.5-flash-preview';
 
     try {
       sessionRef.current = await clientRef.current.live.connect({
@@ -212,19 +212,31 @@ export default function GeminiLiveAudio() {
   };
 
   useEffect(() => {
-    // Initialize audio contexts
-    const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext;
-    inputAudioContextRef.current = new AudioContextClass({ sampleRate: 16000 });
-    outputAudioContextRef.current = new AudioContextClass({ sampleRate: 24000 });
-    
-    inputNodeRef.current = inputAudioContextRef.current.createGain();
-    outputNodeRef.current = outputAudioContextRef.current.createGain();
+    let mounted = true;
 
-    initClient();
+    const initializeApp = async () => {
+      if (!mounted) return;
+
+      // Initialize audio contexts
+      const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext;
+      inputAudioContextRef.current = new AudioContextClass({ sampleRate: 16000 });
+      outputAudioContextRef.current = new AudioContextClass({ sampleRate: 24000 });
+      
+      inputNodeRef.current = inputAudioContextRef.current.createGain();
+      outputNodeRef.current = outputAudioContextRef.current.createGain();
+
+      await initClient();
+    };
+
+    initializeApp();
 
     return () => {
+      mounted = false;
       stopRecording();
-      sessionRef.current?.close();
+      if (sessionRef.current) {
+        sessionRef.current.close();
+        sessionRef.current = null;
+      }
       inputAudioContextRef.current?.close();
       outputAudioContextRef.current?.close();
     };
