@@ -1,10 +1,56 @@
 "use client";
 
 import { useState, useEffect, useRef } from 'react';
-import { GoogleGenerativeAI, Content, Part } from "@google/generative-ai";
+import { GoogleGenAI, LiveServerMessage, Modality, Session } from '@google/genai';
 
-// Define the states for our application
-type AppState = 
+// --- Helper function to create a WAV Blob ---
+// This is a simplified version of what a utility library might provide.
+// It creates a WAV file header and combines it with the raw PCM data.
+const createWavBlob = (pcmData: Float32Array, sampleRate: number): Blob => {
+  const header = new ArrayBuffer(44);
+  const view = new DataView(header);
+
+  // RIFF identifier
+  view.setUint32(0, 1380533830, false); // "RIFF"
+  // file length
+  view.setUint32(4, 36 + pcmData.length * 2, true);
+  // RIFF type
+  view.setUint32(8, 1463899717, false); // "WAVE"
+  // format chunk identifier
+  view.setUint32(12, 1718449184, false); // "fmt "
+  // format chunk length
+  view.setUint32(16, 16, true);
+  // sample format (raw)
+  view.setUint16(20, 1, true);
+  // channel count
+  view.setUint16(22, 1, true);
+  // sample rate
+  view.setUint32(24, sampleRate, true);
+  // byte rate (sample rate * block align)
+  view.setUint32(28, sampleRate * 2, true);
+  // block align (channel count * bytes per sample)
+  view.setUint16(32, 2, true);
+  // bits per sample
+  view.setUint16(34, 16, true);
+  // data chunk identifier
+  view.setUint32(36, 1684108385, false); // "data"
+  // data chunk length
+  view.setUint32(40, pcmData.length * 2, true);
+
+  // Convert PCM to 16-bit
+  const pcm16 = new Int16Array(pcmData.length);
+  for (let i = 0; i < pcmData.length; i++) {
+    const s = Math.max(-1, Math.min(1, pcmData[i]));
+    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+
+  return new Blob([view, pcm16], { type: 'audio/wav' });
+};
+
+
+// --- React Component ---
+
+type AppState =
   | 'IDLE'
   | 'INITIALIZING'
   | 'LISTENING'
@@ -13,7 +59,6 @@ type AppState =
   | 'CONFIRMED'
   | 'ERROR';
 
-// Define the structure for a pending transaction
 interface PendingTransaction {
   amount: number;
   currency: string;
@@ -25,80 +70,94 @@ export default function Home() {
   const [transcript, setTranscript] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [pendingTx, setPendingTx] = useState<PendingTransaction | null>(null);
-  
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const chatRef = useRef<any | null>(null); // Using any for chat object as type is complex
 
-  // 1. Initialize Gemini and Media Recorder
+  const sessionRef = useRef<Session | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const scriptProcessorNodeRef = useRef<ScriptProcessorNode | null>(null);
+  const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+
   useEffect(() => {
     async function initialize() {
       setAppState('INITIALIZING');
       try {
         const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
         if (!apiKey) {
-          throw new Error('NEXT_PUBLIC_GEMINI_API_KEY not found in environment variables.');
+          throw new Error('NEXT_PUBLIC_GEMINI_API_KEY not found.');
         }
 
-        const genAI = new GoogleGenerativeAI(apiKey);
+        const client = new GoogleGenAI({ apiKey });
 
         const systemInstruction = `You are a voice-activated financial assistant. Your primary function is to understand and process transaction commands.
-The user will say things like "Send 10 dollars to vitalik.eth" or "Transfer 5 FLOW tokens to flow-lover.find".
-When you detect a clear intent to make a transaction, you must respond with a JSON object containing the following fields:
+When you detect a clear intent to make a transaction, you must respond with a JSON object containing:
 - "intent": "TRANSACTION"
-- "amount": The numerical amount of the transaction.
+- "amount": The numerical amount.
 - "currency": The currency or token name (e.g., "USD", "FLOW").
-- "recipient": The recipient's name or address (e.g., "vitalik.eth", "flow-lover.find").
+- "recipient": The recipient's name (e.g., "vitalik.eth", "user.find").
 
-Example: If the user says "send 50 flow to sarah.find", you should output:
+Example: If the user says "send 50 flow to sarah.find", you must output:
 {"intent":"TRANSACTION", "amount":50, "currency":"FLOW", "recipient":"sarah.find"}
 
-If the user gives a confirmation command like "yes", "confirm", or "go ahead", you must respond with the JSON object:
+If the user gives a confirmation command like "yes" or "confirm", you must respond with:
 {"intent":"CONFIRMATION", "decision":"yes"}
 
-If the user gives a cancellation command like "no" or "cancel", you must respond with the JSON object:
+If the user gives a cancellation command like "no" or "cancel", you must respond with:
 {"intent":"CONFIRMATION", "decision":"no"}
 
-For any other speech, just transcribe it normally. Do not be conversational.
-Only respond with the JSON objects when a clear intent is detected.`;
+For any other speech, just provide a direct transcript. Do not be conversational.
+Only respond with JSON when a clear intent is detected.`;
 
-        const model = genAI.getGenerativeModel({
-          model: "gemini-1.5-flash-latest",
-          systemInstruction,
+        sessionRef.current = await client.live.connect({
+          model: 'gemini-2.5-flash-preview-native-audio-dialog',
+          config: {
+            // Request text responses, not audio
+            responseModalities: [Modality.TEXT],
+            speechConfig: {
+              languageCode: 'en-US',
+            },
+            systemInstruction: {
+              parts: [{ text: systemInstruction }],
+            },
+          },
+          callbacks: {
+            onmessage: (message: LiveServerMessage) => {
+              const text = message.serverContent?.modelTurn?.parts[0]?.text;
+              if (text) {
+                handleGeminiResponse(text);
+              }
+            },
+            onerror: (e: Error) => {
+              console.error('Live API Error:', e);
+              setError('An API error occurred. Please check the console.');
+              setAppState('ERROR');
+            },
+            onclose: () => {
+              console.log('Live API session closed.');
+            },
+          },
         });
 
-        chatRef.current = model.startChat();
-
-        // Get media stream
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
-
-        // Setup MediaRecorder
-        mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: "video/webm" });
+        // --- Audio Processing Setup ---
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
         
-        mediaRecorderRef.current.ondataavailable = async (event) => {
-          if (event.data.size > 0) {
-            const blob = new Blob([event.data], { type: "video/webm" });
-            const reader = new FileReader();
-            reader.readAsDataURL(blob);
-            reader.onloadend = async () => {
-              const base64Data = (reader.result as string).split(',')[1];
-              const result = await chatRef.current.sendMessageStream([
-                { inlineData: { data: base64Data, mimeType: "video/webm" } }
-              ]);
+        const context = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+        audioContextRef.current = context;
 
-              for await (const item of result.stream) {
-                if (item.text) {
-                  handleGeminiResponse(item.text());
-                }
-              }
-            };
-          }
+        const source = context.createMediaStreamSource(stream);
+        mediaStreamSourceRef.current = source;
+
+        const processor = context.createScriptProcessor(1024, 1, 1);
+        scriptProcessorNodeRef.current = processor;
+
+        processor.onaudioprocess = (audioProcessingEvent) => {
+          const inputBuffer = audioProcessingEvent.inputBuffer;
+          const pcmData = inputBuffer.getChannelData(0);
+          const mediaBlob = createWavBlob(pcmData, context.sampleRate);
+          sessionRef.current?.sendRealtimeInput({ media: mediaBlob });
         };
 
-        mediaRecorderRef.current.start(1000); // Capture 1-second chunks
+        source.connect(processor);
+        processor.connect(context.destination);
+
         setAppState('LISTENING');
 
       } catch (err: any) {
@@ -111,16 +170,18 @@ Only respond with the JSON objects when a clear intent is detected.`;
     initialize();
 
     return () => {
-      mediaRecorderRef.current?.stop();
+      mediaStreamSourceRef.current?.disconnect();
+      scriptProcessorNodeRef.current?.disconnect();
+      audioContextRef.current?.close();
+      sessionRef.current?.close();
     };
   }, []);
 
-  // 2. Handle Gemini's responses
   const handleGeminiResponse = (text: string) => {
     setTranscript(text);
     try {
       const jsonResponse = JSON.parse(text);
-      if (jsonResponse.intent === 'TRANSACTION') {
+      if (jsonResponse.intent === 'TRANSACTION' && appState !== 'AWAITING_CONFIRMATION') {
         setPendingTx({
           amount: jsonResponse.amount,
           currency: jsonResponse.currency,
@@ -130,31 +191,25 @@ Only respond with the JSON objects when a clear intent is detected.`;
       } else if (jsonResponse.intent === 'CONFIRMATION') {
         if (appState === 'AWAITING_CONFIRMATION') {
           if (jsonResponse.decision === 'yes') {
-            // User confirmed, proceed with transaction
             executeTransaction();
           } else {
-            // User cancelled
             setPendingTx(null);
             setAppState('LISTENING');
           }
         }
       }
     } catch (e) {
-      // Not a JSON response, just a regular transcript. Do nothing.
+      // Not a JSON response, just a regular transcript.
     }
   };
 
-  // 3. Execute the transaction
   const executeTransaction = async () => {
     if (!pendingTx) return;
-
     setAppState('SENDING');
     setTranscript(`Sending ${pendingTx.amount} ${pendingTx.currency} to ${pendingTx.recipient}...`);
-
     try {
       let endpoint = '';
       const currency = pendingTx.currency.toUpperCase();
-
       if (currency === 'USD' || currency === 'PYUSD') {
         endpoint = '/api/transact/evm';
       } else if (currency === 'FLOW') {
@@ -162,32 +217,23 @@ Only respond with the JSON objects when a clear intent is detected.`;
       } else {
         throw new Error(`Unsupported currency: ${pendingTx.currency}`);
       }
-
       const response = await fetch(endpoint, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(pendingTx),
       });
-
       const result = await response.json();
-
       if (!response.ok) {
         throw new Error(result.error || 'Transaction failed');
       }
-
       setAppState('CONFIRMED');
       const txIdentifier = result.txHash || result.txId;
-      setTranscript(`Successfully sent! Transaction ID: ${txIdentifier}`);
-
-      // Reset after a few seconds
+      setTranscript(`Success! Tx: ${txIdentifier.substring(0, 10)}...`);
       setTimeout(() => {
         setPendingTx(null);
         setAppState('LISTENING');
         setTranscript('');
-      }, 8000); // Longer timeout to read the tx id
-
+      }, 8000);
     } catch (err: any) {
       console.error("Transaction Execution Error:", err);
       setError(err.message);
@@ -195,11 +241,11 @@ Only respond with the JSON objects when a clear intent is detected.`;
     }
   };
 
-
   return (
     <main style={styles.main}>
       <div style={styles.videoContainer}>
-        <video ref={videoRef} autoPlay muted style={styles.video} />
+        {/* The video element is no longer used for streaming to Gemini, but can be a visual element */}
+        <video autoPlay muted playsInline style={styles.video} />
         <div style={styles.overlay}>
           <div style={styles.statusBox}>
             <p style={styles.statusText}><strong>STATUS:</strong> {appState}</p>
@@ -236,6 +282,7 @@ Only respond with the JSON objects when a clear intent is detected.`;
           <div style={styles.modalContent}>
             <h2>Error</h2>
             <p>{error}</p>
+            <button onClick={() => window.location.reload()} style={styles.button}>Retry</button>
           </div>
         </div>
       )}
@@ -262,11 +309,13 @@ const styles: { [key: string]: React.CSSProperties } = {
     borderRadius: '16px',
     overflow: 'hidden',
     boxShadow: '0 10px 30px rgba(0,0,0,0.5)',
-    border: '1px solid #333'
+    border: '1px solid #333',
+    backgroundColor: '#111'
   },
   video: {
     width: '100%',
     display: 'block',
+    opacity: 0.5, // Video is just for show now
   },
   overlay: {
     position: 'absolute',
@@ -327,5 +376,15 @@ const styles: { [key: string]: React.CSSProperties } = {
   highlight: {
     color: '#4dff94',
     fontWeight: 'bold',
+  },
+  button: {
+    marginTop: '20px',
+    padding: '10px 20px',
+    borderRadius: '8px',
+    border: '1px solid #555',
+    backgroundColor: '#333',
+    color: 'white',
+    cursor: 'pointer',
+    fontSize: '1rem'
   }
 };

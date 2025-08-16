@@ -9,7 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.24.1",
+    "@google/genai": "^1.14.0",
     "@onflow/fcl": "^1.20.0",
     "@onflow/sdk": "^1.10.0",
     "ethers": "^6.15.0",
