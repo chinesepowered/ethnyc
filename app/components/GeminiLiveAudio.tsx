@@ -3,11 +3,15 @@
 import { GoogleGenAI, LiveServerMessage, Modality, Session } from '@google/genai';
 import { useState, useEffect, useRef } from 'react';
 import { createBlob, decode, decodeAudioData } from '../utils/audio';
+import { Analyser } from '../utils/analyser';
 
 export default function GeminiLiveAudio() {
   const [isRecording, setIsRecording] = useState(false);
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
+  const [isConnected, setIsConnected] = useState(false);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
 
   const clientRef = useRef<GoogleGenAI | null>(null);
   const sessionRef = useRef<Session | null>(null);
@@ -20,6 +24,9 @@ export default function GeminiLiveAudio() {
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const scriptProcessorNodeRef = useRef<ScriptProcessorNode | null>(null);
   const sourcesRef = useRef(new Set<AudioBufferSourceNode>());
+  const inputAnalyserRef = useRef<Analyser | null>(null);
+  const outputAnalyserRef = useRef<Analyser | null>(null);
+  const animationFrameRef = useRef<number>();
 
   const updateStatus = (msg: string) => {
     setStatus(msg);
@@ -65,7 +72,8 @@ export default function GeminiLiveAudio() {
         model: model,
         callbacks: {
           onopen: () => {
-            updateStatus('Opened');
+            updateStatus('Connected to Gemini AI');
+            setIsConnected(true);
           },
           onmessage: async (message: LiveServerMessage) => {
             const audio = message.serverContent?.modelTurn?.parts[0]?.inlineData;
@@ -94,6 +102,12 @@ export default function GeminiLiveAudio() {
               source.start(nextStartTimeRef.current);
               nextStartTimeRef.current = nextStartTimeRef.current + audioBuffer.duration;
               sourcesRef.current.add(source);
+              setIsPlaying(true);
+              source.addEventListener('ended', () => {
+                if (sourcesRef.current.size === 1) {
+                  setIsPlaying(false);
+                }
+              });
             }
 
             const interrupted = message.serverContent?.interrupted;
@@ -109,7 +123,8 @@ export default function GeminiLiveAudio() {
             updateError(e.message);
           },
           onclose: (e: CloseEvent) => {
-            updateStatus('Close:' + e.reason);
+            updateStatus('Disconnected: ' + e.reason);
+            setIsConnected(false);
           },
         },
         config: {
@@ -224,6 +239,21 @@ export default function GeminiLiveAudio() {
       
       inputNodeRef.current = inputAudioContextRef.current.createGain();
       outputNodeRef.current = outputAudioContextRef.current.createGain();
+      
+      // Initialize analysers for audio level feedback
+      inputAnalyserRef.current = new Analyser(inputNodeRef.current);
+      outputAnalyserRef.current = new Analyser(outputNodeRef.current);
+      
+      // Start audio level monitoring
+      const updateAudioLevels = () => {
+        if (inputAnalyserRef.current) {
+          inputAnalyserRef.current.update();
+          const level = Math.max(...Array.from(inputAnalyserRef.current.data)) / 255;
+          setAudioLevel(level);
+        }
+        animationFrameRef.current = requestAnimationFrame(updateAudioLevels);
+      };
+      updateAudioLevels();
 
       await initClient();
     };
@@ -237,18 +267,64 @@ export default function GeminiLiveAudio() {
         sessionRef.current.close();
         sessionRef.current = null;
       }
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
       inputAudioContextRef.current?.close();
       outputAudioContextRef.current?.close();
     };
   }, []);
 
   return (
-    <div className="relative w-full h-screen bg-gray-900 flex items-center justify-center">
-      <div className="absolute bottom-20 left-0 right-0 z-10 flex flex-col items-center justify-center gap-2">
+    <div className="relative w-full h-screen bg-gradient-to-br from-gray-900 via-purple-900 to-gray-900 flex items-center justify-center">
+      {/* Connection Status */}
+      <div className="absolute top-6 left-6 z-10">
+        <div className={`flex items-center gap-2 px-3 py-2 rounded-lg ${
+          isConnected ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+        }`}>
+          <div className={`w-2 h-2 rounded-full ${
+            isConnected ? 'bg-green-400' : 'bg-red-400'
+          }`} />
+          {isConnected ? 'Connected' : 'Disconnected'}
+        </div>
+      </div>
+
+      {/* Audio Level Indicator */}
+      {isRecording && (
+        <div className="absolute top-6 right-6 z-10">
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-white/10 text-white">
+            <div className="text-sm">Audio Level:</div>
+            <div className="w-20 h-2 bg-gray-700 rounded-full overflow-hidden">
+              <div 
+                className="h-full bg-gradient-to-r from-green-400 to-red-400 transition-all duration-75"
+                style={{ width: `${audioLevel * 100}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Playing Indicator */}
+      {isPlaying && (
+        <div className="absolute top-20 right-6 z-10">
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-blue-500/20 text-blue-400">
+            <div className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
+            AI Speaking
+          </div>
+        </div>
+      )}
+
+      {/* Main Content */}
+      <div className="text-center text-white">
+        <h1 className="text-4xl font-bold mb-4">Gemini Live Audio</h1>
+        <p className="text-gray-300 mb-8">Click the red button to start talking with AI</p>
+      </div>
+
+      <div className="absolute bottom-20 left-0 right-0 z-10 flex flex-col items-center justify-center gap-4">
         <button
           onClick={reset}
           disabled={isRecording}
-          className="w-16 h-16 rounded-xl bg-white/10 border border-white/20 text-white hover:bg-white/20 disabled:hidden outline-none cursor-pointer flex items-center justify-center"
+          className="w-16 h-16 rounded-xl bg-white/10 border border-white/20 text-white hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed outline-none cursor-pointer flex items-center justify-center transition-all"
         >
           <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -263,7 +339,11 @@ export default function GeminiLiveAudio() {
         <button
           onClick={startRecording}
           disabled={isRecording}
-          className="w-16 h-16 rounded-xl bg-white/10 border border-white/20 text-white hover:bg-white/20 disabled:hidden outline-none cursor-pointer flex items-center justify-center"
+          className={`w-20 h-20 rounded-full border-4 outline-none cursor-pointer flex items-center justify-center transition-all transform hover:scale-105 ${
+            isRecording 
+              ? 'bg-red-500 border-red-400 animate-pulse' 
+              : 'bg-red-600/80 border-red-500 hover:bg-red-500'
+          }`}
         >
           <svg
             viewBox="0 0 100 100"
@@ -278,7 +358,7 @@ export default function GeminiLiveAudio() {
         <button
           onClick={stopRecording}
           disabled={!isRecording}
-          className="w-16 h-16 rounded-xl bg-white/10 border border-white/20 text-white hover:bg-white/20 disabled:hidden outline-none cursor-pointer flex items-center justify-center"
+          className="w-16 h-16 rounded-xl bg-white/10 border border-white/20 text-white hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed outline-none cursor-pointer flex items-center justify-center transition-all"
         >
           <svg
             viewBox="0 0 100 100"
@@ -292,9 +372,17 @@ export default function GeminiLiveAudio() {
         </button>
       </div>
 
-      <div className="absolute bottom-12 left-0 right-0 z-10 text-center text-white">
-        {error && <div className="text-red-400">{error}</div>}
-        {status && <div>{status}</div>}
+      <div className="absolute bottom-6 left-0 right-0 z-10 text-center text-white px-4">
+        {error && (
+          <div className="bg-red-500/20 border border-red-500/30 text-red-400 px-4 py-2 rounded-lg mb-2 max-w-md mx-auto">
+            {error}
+          </div>
+        )}
+        {status && (
+          <div className="bg-white/10 border border-white/20 text-white px-4 py-2 rounded-lg max-w-md mx-auto">
+            {status}
+          </div>
+        )}
       </div>
     </div>
   );
