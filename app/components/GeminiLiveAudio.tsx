@@ -1,8 +1,8 @@
 'use client';
 
-import { GoogleGenAI, LiveServerMessage, Modality, Session } from '@google/genai';
+import { GoogleGenAI, LiveServerMessage, Modality, Session, Blob } from '@google/genai';
 import { useState, useEffect, useRef } from 'react';
-import { createBlob, decode, decodeAudioData } from '../utils/audio';
+import { createBlob, decode, decodeAudioData, encode } from '../utils/audio';
 import { Analyser } from '../utils/analyser';
 
 export default function GeminiLiveAudio() {
@@ -13,6 +13,7 @@ export default function GeminiLiveAudio() {
   const [isConnected, setIsConnected] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [textInput, setTextInput] = useState('');
 
   const clientRef = useRef<GoogleGenAI | null>(null);
   const sessionRef = useRef<Session | null>(null);
@@ -28,6 +29,8 @@ export default function GeminiLiveAudio() {
   const inputAnalyserRef = useRef<Analyser | null>(null);
   const outputAnalyserRef = useRef<Analyser | null>(null);
   const animationFrameRef = useRef<number | undefined>(undefined);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const updateStatus = (msg: string) => {
     setStatus(msg);
@@ -83,8 +86,32 @@ export default function GeminiLiveAudio() {
             
             // Handle setup complete
             if (message.setupComplete) {
-              console.log('Setup completed, ready to send audio');
-              updateStatus('Ready to receive audio input');
+              console.log('Setup completed, ready to send audio and video');
+              updateStatus('Ready to receive audio and video input');
+            }
+
+            // Handle tool calls
+            if (message.toolCall) {
+              console.log('Tool call received:', message.toolCall);
+              const toolCall = message.toolCall;
+              
+              if (toolCall.functionCalls) {
+                for (const functionCall of toolCall.functionCalls) {
+                  if (functionCall.name === 'transfer_flow') {
+                    console.log('Transfer flow called with amount:', functionCall.args?.amount);
+                    // TODO: Implement actual transfer logic
+                    
+                    if (sessionRef.current) {
+                      sessionRef.current.sendToolResponse({
+                        functionResponses: [{
+                          name: 'transfer_flow',
+                          response: { success: true, message: 'Transfer initiated' }
+                        }]
+                      });
+                    }
+                  }
+                }
+              }
             }
             
             const audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData;
@@ -140,7 +167,24 @@ export default function GeminiLiveAudio() {
           },
         },
         config: {
-          responseModalities: [Modality.AUDIO],
+          responseModalities: [Modality.AUDIO, Modality.VIDEO],
+          systemInstruction: 'You are a helpful AI assistant that can see and hear.',
+          tools: [{
+            functionDeclarations: [{
+              name: 'transfer_flow',
+              description: 'Transfer Flow tokens to another address',
+              parameters: {
+                type: 'object',
+                properties: {
+                  amount: {
+                    type: 'number',
+                    description: 'Amount of Flow tokens to transfer'
+                  }
+                },
+                required: ['amount']
+              }
+            }]
+          }],
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Orus' } },
           },
@@ -170,10 +214,21 @@ export default function GeminiLiveAudio() {
     try {
       mediaStreamRef.current = await navigator.mediaDevices.getUserMedia({
         audio: true,
-        video: false,
+        video: true,
       });
 
-      updateStatus('Microphone access granted. Starting capture...');
+      updateStatus('Media access granted. Starting capture...');
+
+      // Set up video element
+      if (videoRef.current && mediaStreamRef.current) {
+        videoRef.current.srcObject = mediaStreamRef.current;
+        try {
+          await videoRef.current.play();
+          console.log('Video stream started successfully');
+        } catch (err) {
+          console.error('Error playing video:', err);
+        }
+      }
 
       if (inputAudioContextRef.current && inputNodeRef.current) {
         sourceNodeRef.current = inputAudioContextRef.current.createMediaStreamSource(
@@ -208,6 +263,44 @@ export default function GeminiLiveAudio() {
             console.log('No session available to send audio');
           }
         };
+
+        // Set up video frame capture
+        const sendVideoFrame = async () => {
+          if (!isRecordingRef.current || !videoRef.current || !canvasRef.current || !sessionRef.current) return;
+          
+          const canvas = canvasRef.current;
+          const video = videoRef.current;
+          const ctx = canvas.getContext('2d');
+          
+          if (ctx && video.videoWidth > 0 && video.videoHeight > 0) {
+            // Resize to smaller resolution for better performance
+            canvas.width = 320;
+            canvas.height = 240;
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            try {
+              const imageData = canvas.toDataURL('image/jpeg', 0.7);
+              const base64Data = imageData.split(',')[1]; // Remove data:image/jpeg;base64, prefix
+              
+              const videoBlob: Blob = {
+                data: base64Data,
+                mimeType: 'image/jpeg'
+              };
+              
+              console.log('Sending video frame, size:', base64Data.length, 'type: image/jpeg');
+              sessionRef.current.sendRealtimeInput({ video: videoBlob });
+            } catch (err) {
+              console.error('Error sending video frame:', err);
+            }
+          }
+          
+          if (isRecordingRef.current) {
+            setTimeout(sendVideoFrame, 500); // Send frame every 500ms (2fps)
+          }
+        };
+        
+        // Start video frame capture after a delay to ensure video is ready
+        setTimeout(sendVideoFrame, 1000);
 
         sourceNodeRef.current.connect(scriptProcessorNodeRef.current);
         scriptProcessorNodeRef.current.connect(inputAudioContextRef.current.destination);
@@ -252,6 +345,13 @@ export default function GeminiLiveAudio() {
     sessionRef.current?.close();
     initSession();
     updateStatus('Session cleared.');
+  };
+
+  const sendTextMessage = () => {
+    if (!textInput.trim() || !sessionRef.current) return;
+    
+    sessionRef.current.sendRealtimeInput({ text: textInput });
+    setTextInput('');
   };
 
   useEffect(() => {
@@ -308,11 +408,12 @@ export default function GeminiLiveAudio() {
   }, []);
 
   return (
-    <div className="relative w-full h-screen bg-gradient-to-br from-gray-900 via-purple-900 to-gray-900 flex items-center justify-center">
-      {/* Connection Status */}
-      <div className="absolute top-6 left-6 z-10">
-        <div className={`flex items-center gap-2 px-3 py-2 rounded-lg ${
-          isConnected ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+    <div className="relative w-full h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
+      {/* Header with connection status */}
+      <div className="flex justify-between items-center p-6">
+        <h1 className="text-2xl font-bold text-white">Gemini Live Video Chat</h1>
+        <div className={`flex items-center gap-2 px-4 py-2 rounded-full ${
+          isConnected ? 'bg-green-500/20 text-green-400 border border-green-500/30' : 'bg-red-500/20 text-red-400 border border-red-500/30'
         }`}>
           <div className={`w-2 h-2 rounded-full ${
             isConnected ? 'bg-green-400' : 'bg-red-400'
@@ -321,101 +422,161 @@ export default function GeminiLiveAudio() {
         </div>
       </div>
 
-      {/* Audio Level Indicator */}
-      {isRecording && (
-        <div className="absolute top-6 right-6 z-10">
-          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-white/10 text-white">
-            <div className="text-sm">Audio Level:</div>
-            <div className="w-20 h-2 bg-gray-700 rounded-full overflow-hidden">
-              <div 
-                className="h-full bg-gradient-to-r from-green-400 to-red-400 transition-all duration-75"
-                style={{ width: `${audioLevel * 100}%` }}
-              />
+      {/* Main video area */}
+      <div className="flex-1 flex items-center justify-center p-6">
+        <div className="relative">
+          <video 
+            ref={videoRef} 
+            className={`rounded-2xl border-2 shadow-2xl transition-all duration-300 ${
+              isRecording 
+                ? 'w-96 h-72 border-blue-500/50 shadow-blue-500/20' 
+                : 'w-80 h-60 border-gray-500/30 shadow-gray-500/10'
+            }`}
+            muted 
+            autoPlay
+            playsInline
+          />
+          
+          {/* Recording indicator overlay */}
+          {isRecording && (
+            <div className="absolute top-3 left-3 flex items-center gap-2 px-3 py-1 bg-red-500/20 border border-red-500/50 rounded-full">
+              <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+              <span className="text-red-400 text-sm font-medium">LIVE</span>
             </div>
-          </div>
+          )}
+
+          {/* Audio level indicator */}
+          {isRecording && (
+            <div className="absolute bottom-3 left-3 right-3">
+              <div className="bg-black/50 backdrop-blur-sm rounded-lg p-3">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="text-white text-xs">Audio Level</div>
+                  <div className="flex-1 h-1 bg-gray-700 rounded-full overflow-hidden">
+                    <div 
+                      className="h-full bg-gradient-to-r from-green-400 to-red-400 transition-all duration-75"
+                      style={{ width: `${audioLevel * 100}%` }}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* AI speaking indicator */}
+          {isPlaying && (
+            <div className="absolute top-3 right-3 flex items-center gap-2 px-3 py-1 bg-blue-500/20 border border-blue-500/50 rounded-full">
+              <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" />
+              <span className="text-blue-400 text-sm font-medium">AI Speaking</span>
+            </div>
+          )}
+
+          {/* No video placeholder */}
+          {!isRecording && (
+            <div className="absolute inset-0 flex items-center justify-center bg-slate-800/80 rounded-2xl">
+              <div className="text-center text-slate-400">
+                <svg className="w-16 h-16 mx-auto mb-4 opacity-50" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4zM14 13h-3v3H9v-3H6v-2h3V8h2v3h3v2z"/>
+                </svg>
+                <p className="text-sm">Start recording to see video</p>
+              </div>
+            </div>
+          )}
         </div>
-      )}
+      </div>
 
-      {/* Playing Indicator */}
-      {isPlaying && (
-        <div className="absolute top-20 right-6 z-10">
-          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-blue-500/20 text-blue-400">
-            <div className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
-            AI Speaking
-          </div>
+      {/* Controls and input area */}
+      <div className="p-6 bg-slate-800/50 backdrop-blur-sm border-t border-slate-700/50">
+        {/* Control buttons */}
+        <div className="flex items-center justify-center gap-4 mb-4">
+          <button
+            onClick={reset}
+            disabled={isRecording}
+            className="w-12 h-12 rounded-xl bg-slate-700/50 border border-slate-600/50 text-white hover:bg-slate-600/50 disabled:opacity-50 disabled:cursor-not-allowed outline-none cursor-pointer flex items-center justify-center transition-all"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              height="24px"
+              viewBox="0 -960 960 960"
+              width="24px"
+              fill="#ffffff"
+            >
+              <path d="M480-160q-134 0-227-93t-93-227q0-134 93-227t227-93q69 0 132 28.5T720-690v-110h80v280H520v-80h168q-32-56-87.5-88T480-720q-100 0-170 70t-70 170q0 100 70 170t170 70q77 0 139-44t87-116h84q-28 106-114 173t-196 67Z" />
+            </svg>
+          </button>
+          
+          <button
+            onClick={startRecording}
+            disabled={isRecording}
+            className={`w-16 h-16 rounded-full border-4 outline-none cursor-pointer flex items-center justify-center transition-all transform hover:scale-105 ${
+              isRecording 
+                ? 'bg-red-500 border-red-400 animate-pulse' 
+                : 'bg-red-600/80 border-red-500 hover:bg-red-500'
+            }`}
+          >
+            <svg
+              viewBox="0 0 100 100"
+              width="32px"
+              height="32px"
+              fill="white"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <circle cx="50" cy="50" r="30" />
+            </svg>
+          </button>
+          
+          <button
+            onClick={stopRecording}
+            disabled={!isRecording}
+            className="w-12 h-12 rounded-xl bg-slate-700/50 border border-slate-600/50 text-white hover:bg-slate-600/50 disabled:opacity-50 disabled:cursor-not-allowed outline-none cursor-pointer flex items-center justify-center transition-all"
+          >
+            <svg
+              viewBox="0 0 100 100"
+              width="24px"
+              height="24px"
+              fill="#ffffff"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <rect x="25" y="25" width="50" height="50" rx="8" />
+            </svg>
+          </button>
         </div>
-      )}
 
-      {/* Main Content */}
-      <div className="text-center text-white">
-        <h1 className="text-4xl font-bold mb-4">Gemini Live Audio</h1>
-        <p className="text-gray-300 mb-8">Click the red button to start talking with AI</p>
+        {/* Text input area */}
+        <div className="flex gap-3 mb-4">
+          <input
+            type="text"
+            value={textInput}
+            onChange={(e) => setTextInput(e.target.value)}
+            onKeyPress={(e) => e.key === 'Enter' && sendTextMessage()}
+            placeholder="Type a message..."
+            className="flex-1 bg-slate-700/50 border border-slate-600/50 rounded-xl px-4 py-3 text-white placeholder-slate-400 outline-none focus:border-blue-500/50 focus:bg-slate-700/70 transition-all"
+          />
+          <button
+            onClick={sendTextMessage}
+            disabled={!textInput.trim() || !isConnected}
+            className="px-6 py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-600 disabled:cursor-not-allowed text-white rounded-xl outline-none transition-all font-medium"
+          >
+            Send
+          </button>
+        </div>
+
+        {/* Status messages */}
+        <div className="min-h-[2rem]">
+          {error && (
+            <div className="bg-red-500/20 border border-red-500/30 text-red-400 px-4 py-2 rounded-lg text-sm">
+              {error}
+            </div>
+          )}
+          {status && !error && (
+            <div className="bg-slate-700/50 border border-slate-600/30 text-slate-300 px-4 py-2 rounded-lg text-sm">
+              {status}
+            </div>
+          )}
+        </div>
       </div>
 
-      <div className="absolute bottom-20 left-0 right-0 z-10 flex flex-col items-center justify-center gap-4">
-        <button
-          onClick={reset}
-          disabled={isRecording}
-          className="w-16 h-16 rounded-xl bg-white/10 border border-white/20 text-white hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed outline-none cursor-pointer flex items-center justify-center transition-all"
-        >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            height="40px"
-            viewBox="0 -960 960 960"
-            width="40px"
-            fill="#ffffff"
-          >
-            <path d="M480-160q-134 0-227-93t-93-227q0-134 93-227t227-93q69 0 132 28.5T720-690v-110h80v280H520v-80h168q-32-56-87.5-88T480-720q-100 0-170 70t-70 170q0 100 70 170t170 70q77 0 139-44t87-116h84q-28 106-114 173t-196 67Z" />
-          </svg>
-        </button>
-        <button
-          onClick={startRecording}
-          disabled={isRecording}
-          className={`w-20 h-20 rounded-full border-4 outline-none cursor-pointer flex items-center justify-center transition-all transform hover:scale-105 ${
-            isRecording 
-              ? 'bg-red-500 border-red-400 animate-pulse' 
-              : 'bg-red-600/80 border-red-500 hover:bg-red-500'
-          }`}
-        >
-          <svg
-            viewBox="0 0 100 100"
-            width="32px"
-            height="32px"
-            fill="#c80000"
-            xmlns="http://www.w3.org/2000/svg"
-          >
-            <circle cx="50" cy="50" r="50" />
-          </svg>
-        </button>
-        <button
-          onClick={stopRecording}
-          disabled={!isRecording}
-          className="w-16 h-16 rounded-xl bg-white/10 border border-white/20 text-white hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed outline-none cursor-pointer flex items-center justify-center transition-all"
-        >
-          <svg
-            viewBox="0 0 100 100"
-            width="32px"
-            height="32px"
-            fill="#000000"
-            xmlns="http://www.w3.org/2000/svg"
-          >
-            <rect x="0" y="0" width="100" height="100" rx="15" />
-          </svg>
-        </button>
-      </div>
-
-      <div className="absolute bottom-6 left-0 right-0 z-10 text-center text-white px-4">
-        {error && (
-          <div className="bg-red-500/20 border border-red-500/30 text-red-400 px-4 py-2 rounded-lg mb-2 max-w-md mx-auto">
-            {error}
-          </div>
-        )}
-        {status && (
-          <div className="bg-white/10 border border-white/20 text-white px-4 py-2 rounded-lg max-w-md mx-auto">
-            {status}
-          </div>
-        )}
-      </div>
+      {/* Hidden canvas for video capture */}
+      <canvas ref={canvasRef} className="hidden" />
     </div>
   );
 }
