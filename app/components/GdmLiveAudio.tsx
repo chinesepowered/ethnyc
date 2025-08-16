@@ -136,9 +136,10 @@ export const GdmLiveAudio: React.FC = () => {
   }, [initClient]);
 
   const startRecording = useCallback(async () => {
-    if (isRecording || !inputAudioContextRef.current) return;
+    if (isRecording || !inputAudioContextRef.current || !outputAudioContextRef.current) return;
 
     inputAudioContextRef.current.resume();
+    outputAudioContextRef.current.resume();
     updateStatus('Requesting microphone access...');
 
     try {

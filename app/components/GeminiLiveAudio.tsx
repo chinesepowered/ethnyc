@@ -7,6 +7,7 @@ import { Analyser } from '../utils/analyser';
 
 export default function GeminiLiveAudio() {
   const [isRecording, setIsRecording] = useState(false);
+  const isRecordingRef = useRef(false);
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
   const [isConnected, setIsConnected] = useState(false);
@@ -26,7 +27,7 @@ export default function GeminiLiveAudio() {
   const sourcesRef = useRef(new Set<AudioBufferSourceNode>());
   const inputAnalyserRef = useRef<Analyser | null>(null);
   const outputAnalyserRef = useRef<Analyser | null>(null);
-  const animationFrameRef = useRef<number>();
+  const animationFrameRef = useRef<number | undefined>(undefined);
 
   const updateStatus = (msg: string) => {
     setStatus(msg);
@@ -77,7 +78,16 @@ export default function GeminiLiveAudio() {
           },
           onmessage: async (message: LiveServerMessage) => {
             console.log('Received message:', message);
-            const audio = message.serverContent?.modelTurn?.parts[0]?.inlineData;
+            console.log('Message type:', Object.keys(message));
+            console.log('Server content:', message.serverContent);
+            
+            // Handle setup complete
+            if (message.setupComplete) {
+              console.log('Setup completed, ready to send audio');
+              updateStatus('Ready to receive audio input');
+            }
+            
+            const audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData;
 
             if (audio && outputAudioContextRef.current) {
               console.log('Processing audio response');
@@ -87,7 +97,7 @@ export default function GeminiLiveAudio() {
               );
 
               const audioBuffer = await decodeAudioData(
-                decode(audio.data),
+                decode(audio.data!),
                 outputAudioContextRef.current,
                 24000,
                 1,
@@ -147,6 +157,10 @@ export default function GeminiLiveAudio() {
       return;
     }
 
+    if (!sessionRef.current) {
+      await initSession();
+    }
+
     if (inputAudioContextRef.current) {
       inputAudioContextRef.current.resume();
     }
@@ -175,18 +189,23 @@ export default function GeminiLiveAudio() {
         );
 
         scriptProcessorNodeRef.current.onaudioprocess = (audioProcessingEvent) => {
-          if (!isRecording) return;
+          console.log('Audio processing event fired, isRecording:', isRecordingRef.current);
+          if (!isRecordingRef.current) return;
 
           const inputBuffer = audioProcessingEvent.inputBuffer;
           const pcmData = inputBuffer.getChannelData(0);
+          console.log('PCM data received, length:', pcmData.length, 'sample:', pcmData[0]);
 
           if (sessionRef.current) {
             console.log('Sending audio chunk, size:', pcmData.length, 'max amplitude:', Math.max(...pcmData.map(Math.abs)));
             try {
               sessionRef.current.sendRealtimeInput({ media: createBlob(pcmData) });
+              console.log('Audio chunk sent successfully');
             } catch (err) {
               console.error('Error sending audio:', err);
             }
+          } else {
+            console.log('No session available to send audio');
           }
         };
 
@@ -194,6 +213,7 @@ export default function GeminiLiveAudio() {
         scriptProcessorNodeRef.current.connect(inputAudioContextRef.current.destination);
 
         setIsRecording(true);
+        isRecordingRef.current = true;
         updateStatus('🔴 Recording... Capturing PCM chunks.');
       }
     } catch (err) {
@@ -210,6 +230,7 @@ export default function GeminiLiveAudio() {
     updateStatus('Stopping recording...');
 
     setIsRecording(false);
+    isRecordingRef.current = false;
 
     if (scriptProcessorNodeRef.current && sourceNodeRef.current && inputAudioContextRef.current) {
       scriptProcessorNodeRef.current.disconnect();
@@ -277,8 +298,12 @@ export default function GeminiLiveAudio() {
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
-      inputAudioContextRef.current?.close();
-      outputAudioContextRef.current?.close();
+             if (inputAudioContextRef.current) {
+         inputAudioContextRef.current.close();
+       }
+       if (outputAudioContextRef.current) {
+         outputAudioContextRef.current.close();
+       }
     };
   }, []);
 
