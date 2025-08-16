@@ -1,103 +1,331 @@
-import Image from "next/image";
+"use client";
+
+import { useState, useEffect, useRef } from 'react';
+import { GoogleGenerativeAI, Content, Part } from "@google/generative-ai";
+
+// Define the states for our application
+type AppState = 
+  | 'IDLE'
+  | 'INITIALIZING'
+  | 'LISTENING'
+  | 'AWAITING_CONFIRMATION'
+  | 'SENDING'
+  | 'CONFIRMED'
+  | 'ERROR';
+
+// Define the structure for a pending transaction
+interface PendingTransaction {
+  amount: number;
+  currency: string;
+  recipient: string;
+}
 
 export default function Home() {
-  return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm/6 text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-[family-name:var(--font-geist-mono)] font-semibold">
-              app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+  const [appState, setAppState] = useState<AppState>('IDLE');
+  const [transcript, setTranscript] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [pendingTx, setPendingTx] = useState<PendingTransaction | null>(null);
+  
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chatRef = useRef<any | null>(null); // Using any for chat object as type is complex
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+  // 1. Initialize Gemini and Media Recorder
+  useEffect(() => {
+    async function initialize() {
+      setAppState('INITIALIZING');
+      try {
+        const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
+        if (!apiKey) {
+          throw new Error('NEXT_PUBLIC_GEMINI_API_KEY not found in environment variables.');
+        }
+
+        const genAI = new GoogleGenerativeAI(apiKey);
+
+        const systemInstruction = `You are a voice-activated financial assistant. Your primary function is to understand and process transaction commands.
+The user will say things like "Send 10 dollars to vitalik.eth" or "Transfer 5 FLOW tokens to flow-lover.find".
+When you detect a clear intent to make a transaction, you must respond with a JSON object containing the following fields:
+- "intent": "TRANSACTION"
+- "amount": The numerical amount of the transaction.
+- "currency": The currency or token name (e.g., "USD", "FLOW").
+- "recipient": The recipient's name or address (e.g., "vitalik.eth", "flow-lover.find").
+
+Example: If the user says "send 50 flow to sarah.find", you should output:
+{"intent":"TRANSACTION", "amount":50, "currency":"FLOW", "recipient":"sarah.find"}
+
+If the user gives a confirmation command like "yes", "confirm", or "go ahead", you must respond with the JSON object:
+{"intent":"CONFIRMATION", "decision":"yes"}
+
+If the user gives a cancellation command like "no" or "cancel", you must respond with the JSON object:
+{"intent":"CONFIRMATION", "decision":"no"}
+
+For any other speech, just transcribe it normally. Do not be conversational.
+Only respond with the JSON objects when a clear intent is detected.`;
+
+        const model = genAI.getGenerativeModel({
+          model: "gemini-1.5-flash-latest",
+          systemInstruction,
+        });
+
+        chatRef.current = model.startChat();
+
+        // Get media stream
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+
+        // Setup MediaRecorder
+        mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: "video/webm" });
+        
+        mediaRecorderRef.current.ondataavailable = async (event) => {
+          if (event.data.size > 0) {
+            const blob = new Blob([event.data], { type: "video/webm" });
+            const reader = new FileReader();
+            reader.readAsDataURL(blob);
+            reader.onloadend = async () => {
+              const base64Data = (reader.result as string).split(',')[1];
+              const result = await chatRef.current.sendMessageStream([
+                { inlineData: { data: base64Data, mimeType: "video/webm" } }
+              ]);
+
+              for await (const item of result.stream) {
+                if (item.text) {
+                  handleGeminiResponse(item.text());
+                }
+              }
+            };
+          }
+        };
+
+        mediaRecorderRef.current.start(1000); // Capture 1-second chunks
+        setAppState('LISTENING');
+
+      } catch (err: any) {
+        console.error("Initialization Error:", err);
+        setError(err.message || "An unknown error occurred during initialization.");
+        setAppState('ERROR');
+      }
+    }
+
+    initialize();
+
+    return () => {
+      mediaRecorderRef.current?.stop();
+    };
+  }, []);
+
+  // 2. Handle Gemini's responses
+  const handleGeminiResponse = (text: string) => {
+    setTranscript(text);
+    try {
+      const jsonResponse = JSON.parse(text);
+      if (jsonResponse.intent === 'TRANSACTION') {
+        setPendingTx({
+          amount: jsonResponse.amount,
+          currency: jsonResponse.currency,
+          recipient: jsonResponse.recipient,
+        });
+        setAppState('AWAITING_CONFIRMATION');
+      } else if (jsonResponse.intent === 'CONFIRMATION') {
+        if (appState === 'AWAITING_CONFIRMATION') {
+          if (jsonResponse.decision === 'yes') {
+            // User confirmed, proceed with transaction
+            executeTransaction();
+          } else {
+            // User cancelled
+            setPendingTx(null);
+            setAppState('LISTENING');
+          }
+        }
+      }
+    } catch (e) {
+      // Not a JSON response, just a regular transcript. Do nothing.
+    }
+  };
+
+  // 3. Execute the transaction
+  const executeTransaction = async () => {
+    if (!pendingTx) return;
+
+    setAppState('SENDING');
+    setTranscript(`Sending ${pendingTx.amount} ${pendingTx.currency} to ${pendingTx.recipient}...`);
+
+    try {
+      let endpoint = '';
+      const currency = pendingTx.currency.toUpperCase();
+
+      if (currency === 'USD' || currency === 'PYUSD') {
+        endpoint = '/api/transact/evm';
+      } else if (currency === 'FLOW') {
+        endpoint = '/api/transact/flow';
+      } else {
+        throw new Error(`Unsupported currency: ${pendingTx.currency}`);
+      }
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(pendingTx),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.error || 'Transaction failed');
+      }
+
+      setAppState('CONFIRMED');
+      const txIdentifier = result.txHash || result.txId;
+      setTranscript(`Successfully sent! Transaction ID: ${txIdentifier}`);
+
+      // Reset after a few seconds
+      setTimeout(() => {
+        setPendingTx(null);
+        setAppState('LISTENING');
+        setTranscript('');
+      }, 8000); // Longer timeout to read the tx id
+
+    } catch (err: any) {
+      console.error("Transaction Execution Error:", err);
+      setError(err.message);
+      setAppState('ERROR');
+    }
+  };
+
+
+  return (
+    <main style={styles.main}>
+      <div style={styles.videoContainer}>
+        <video ref={videoRef} autoPlay muted style={styles.video} />
+        <div style={styles.overlay}>
+          <div style={styles.statusBox}>
+            <p style={styles.statusText}><strong>STATUS:</strong> {appState}</p>
+          </div>
+          <div style={styles.transcriptBox}>
+            <p>{transcript}</p>
+          </div>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
-    </div>
+      </div>
+
+      {appState === 'AWAITING_CONFIRMATION' && pendingTx && (
+        <div style={styles.modal}>
+          <div style={styles.modalContent}>
+            <h2>Confirm Transaction</h2>
+            <p style={styles.confirmationText}>
+              Send <span style={styles.highlight}>{pendingTx.amount} {pendingTx.currency}</span> to <span style={styles.highlight}>{pendingTx.recipient}</span>?
+            </p>
+            <p><em>(Say "Yes" to confirm or "No" to cancel)</em></p>
+          </div>
+        </div>
+      )}
+
+      {(appState === 'CONFIRMED' || appState === 'SENDING') && (
+         <div style={styles.modal}>
+          <div style={styles.modalContent}>
+            <h2>{appState === 'SENDING' ? 'Sending...' : 'Transaction Confirmed!'}</h2>
+            <p>{transcript}</p>
+          </div>
+        </div>
+      )}
+
+      {appState === 'ERROR' && (
+         <div style={styles.modal}>
+          <div style={styles.modalContent}>
+            <h2>Error</h2>
+            <p>{error}</p>
+          </div>
+        </div>
+      )}
+    </main>
   );
 }
+
+// Basic inline styles for layout
+const styles: { [key: string]: React.CSSProperties } = {
+  main: {
+    width: '100vw',
+    height: '100vh',
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#000',
+    color: 'white',
+    fontFamily: 'monospace'
+  },
+  videoContainer: {
+    position: 'relative',
+    width: '80%',
+    maxWidth: '960px',
+    borderRadius: '16px',
+    overflow: 'hidden',
+    boxShadow: '0 10px 30px rgba(0,0,0,0.5)',
+    border: '1px solid #333'
+  },
+  video: {
+    width: '100%',
+    display: 'block',
+  },
+  overlay: {
+    position: 'absolute',
+    bottom: '0',
+    left: '0',
+    width: '100%',
+    padding: '20px',
+    boxSizing: 'border-box',
+    background: 'linear-gradient(to top, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0) 100%)',
+  },
+  statusBox: {
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    borderRadius: '8px',
+    padding: '5px 15px',
+    marginBottom: '10px',
+    width: 'fit-content',
+    border: '1px solid #444'
+  },
+  statusText: {
+    margin: 0,
+    fontSize: '1rem',
+    fontWeight: 'bold',
+    textTransform: 'uppercase'
+  },
+  transcriptBox: {
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    borderRadius: '8px',
+    padding: '15px',
+    minHeight: '50px',
+    border: '1px solid #444',
+    fontSize: '1.2rem'
+  },
+  modal: {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    width: '100%',
+    height: '100%',
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 100,
+  },
+  modalContent: {
+    backgroundColor: '#1a1a1a',
+    padding: '40px',
+    borderRadius: '16px',
+    textAlign: 'center',
+    boxShadow: '0 5px 20px rgba(0,0,0,0.5)',
+    border: '1px solid #555',
+    maxWidth: '80%',
+  },
+  confirmationText: {
+    fontSize: '1.5rem',
+    margin: '20px 0',
+  },
+  highlight: {
+    color: '#4dff94',
+    fontWeight: 'bold',
+  }
+};
