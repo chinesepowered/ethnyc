@@ -617,7 +617,7 @@ export default function GeminiLiveAudio() {
     <div className="relative w-full h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
       {/* Header with connection status */}
       <div className="flex justify-between items-center p-6">
-        <h1 className="text-2xl font-bold text-white">Gemini Live Video Chat</h1>
+        <h1 className="text-2xl font-bold text-white">Vitalik</h1>
         <div className={`flex items-center gap-2 px-4 py-2 rounded-full ${
           isConnected ? 'bg-green-500/20 text-green-400 border border-green-500/30' : 'bg-red-500/20 text-red-400 border border-red-500/30'
         }`}>
