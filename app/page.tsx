@@ -55,9 +55,7 @@ export default function Home() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const scriptProcessorNodeRef = useRef<ScriptProcessorNode | null>(null);
   const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const videoIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null); // Keep for visual display
 
   useEffect(() => {
     async function initialize() {
@@ -70,7 +68,7 @@ export default function Home() {
 
         const client = new GoogleGenAI({ apiKey });
 
-        const systemInstruction = `You are a voice-activated financial assistant. Your primary function is to understand and process transaction commands based on audio and video context.
+        const systemInstruction = `You are a voice-activated financial assistant. Your primary function is to understand and process transaction commands.
 When you detect a clear intent to make a transaction, you must respond with a JSON object containing:
 - "intent": "TRANSACTION"
 - "amount": The numerical amount.
@@ -90,15 +88,20 @@ For any other speech, just provide a direct transcript. Do not be conversational
 Only respond with JSON when a clear intent is detected.`;
 
         sessionRef.current = await client.live.connect({
-          model: 'gemini-2.5-flash-preview-native-audio-dialog', // Note: Model may need to change for video
+          model: 'gemini-2.5-flash-preview-native-audio-dialog',
           config: {
-            requestModalities: [Modality.AUDIO, Modality.VIDEO],
+            // Reverted to audio-only request and text response
+            requestModalities: [Modality.AUDIO],
             responseModalities: [Modality.TEXT],
             speechConfig: { languageCode: 'en-US' },
             systemInstruction: { parts: [{ text: systemInstruction }] },
           },
           callbacks: {
+            onopen: () => {
+              console.log('GEMINI LIVE SESSION OPENED');
+            },
             onmessage: (message: LiveServerMessage) => {
+              console.log('onmessage received:', message);
               const text = message.serverContent?.modelTurn?.parts[0]?.text;
               if (text) {
                 handleGeminiResponse(text);
@@ -115,10 +118,10 @@ Only respond with JSON when a clear intent is detected.`;
           },
         });
 
-        // --- Audio & Video Processing Setup ---
+        // --- Audio & Video Display Setup ---
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: { sampleRate: 16000, channelCount: 1 },
-          video: { width: 640, height: 480, frameRate: 5 } // Lower frame rate for performance
+          video: true // Keep video for display purposes
         });
 
         if (videoRef.current) {
@@ -133,32 +136,19 @@ Only respond with JSON when a clear intent is detected.`;
         const processor = context.createScriptProcessor(1024, 1, 1);
         scriptProcessorNodeRef.current = processor;
         processor.onaudioprocess = (audioProcessingEvent) => {
-          if (sessionRef.current?.connectionState !== 'OPEN') return;
+          console.log('onaudioprocess triggered');
+          if (sessionRef.current?.connectionState !== 'OPEN') {
+            console.log(`Skipping audio processing: connection state is ${sessionRef.current?.connectionState}`);
+            return;
+          }
           const inputBuffer = audioProcessingEvent.inputBuffer;
           const pcmData = inputBuffer.getChannelData(0);
+          console.log(`PCM data length: ${pcmData.length}`);
           const mediaBlob = createWavBlob(pcmData, context.sampleRate);
           sessionRef.current?.sendRealtimeInput({ media: mediaBlob });
         };
         source.connect(processor);
         processor.connect(context.destination);
-        
-        // --- Video Processor ---
-        videoIntervalRef.current = setInterval(() => {
-          if (sessionRef.current?.connectionState !== 'OPEN' || !videoRef.current || !canvasRef.current) {
-            return;
-          }
-          const canvas = canvasRef.current;
-          const video = videoRef.current;
-          const ctx = canvas.getContext('2d');
-          if (ctx) {
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            canvas.toBlob((blob) => {
-              if (blob && sessionRef.current?.connectionState === 'OPEN') {
-                sessionRef.current?.sendRealtimeInput({ media: blob });
-              }
-            }, 'image/jpeg', 0.7);
-          }
-        }, 200); // 5 fps (1000ms / 5)
 
         setAppState('LISTENING');
 
@@ -172,9 +162,6 @@ Only respond with JSON when a clear intent is detected.`;
     initialize();
 
     return () => {
-      if (videoIntervalRef.current) {
-        clearInterval(videoIntervalRef.current);
-      }
       mediaStreamSourceRef.current?.disconnect();
       scriptProcessorNodeRef.current?.disconnect();
       audioContextRef.current?.close();
@@ -242,7 +229,6 @@ Only respond with JSON when a clear intent is detected.`;
     <main style={styles.main}>
       <div style={styles.videoContainer}>
         <video ref={videoRef} autoPlay muted playsInline style={styles.video} />
-        <canvas ref={canvasRef} width="640" height="480" style={{ display: 'none' }} />
         <div style={styles.overlay}>
           <div style={styles.statusBox}>
             <p style={styles.statusText}><strong>STATUS:</strong> {appState}</p>
