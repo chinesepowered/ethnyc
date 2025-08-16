@@ -13,9 +13,12 @@
     "@onflow/fcl": "^1.20.0",
     "@onflow/sdk": "^1.10.0",
     "ethers": "^6.15.0",
+    "lit": "^3.3.1",
     "next": "15.3.3",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "three": "^0.179.1",
+    "web-audio-api": "^0.2.2"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

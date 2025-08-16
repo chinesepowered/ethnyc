@@ -1,372 +1,308 @@
-"use client";
+/* tslint:disable */
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
-import { useState, useEffect, useRef } from 'react';
-import { GoogleGenAI, LiveServerMessage, Modality, Session } from '@google/genai';
+import {GoogleGenAI, LiveServerMessage, Modality, Session} from '@google/genai';
+import {LitElement, css, html} from 'lit';
+import {customElement, state} from 'lit/decorators.js';
+import {createBlob, decode, decodeAudioData} from './utils';
+import './visual-3d';
 
-// --- Helper function to create a WAV Blob ---
-const createWavBlob = (pcmData: Float32Array, sampleRate: number): Blob => {
-  const header = new ArrayBuffer(44);
-  const view = new DataView(header);
-  view.setUint32(0, 1380533830, false); // "RIFF"
-  view.setUint32(4, 36 + pcmData.length * 2, true);
-  view.setUint32(8, 1463899717, false); // "WAVE"
-  view.setUint32(12, 1718449184, false); // "fmt "
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  view.setUint32(36, 1684108385, false); // "data"
-  view.setUint32(40, pcmData.length * 2, true);
-  const pcm16 = new Int16Array(pcmData.length);
-  for (let i = 0; i < pcmData.length; i++) {
-    const s = Math.max(-1, Math.min(1, pcmData[i]));
-    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-  }
-  return new Blob([view, pcm16], { type: 'audio/wav' });
-};
+@customElement('gdm-live-audio')
+export class GdmLiveAudio extends LitElement {
+  @state() isRecording = false;
+  @state() status = '';
+  @state() error = '';
 
-// --- React Component ---
+  private client: GoogleGenAI;
+  private session: Session;
+  private inputAudioContext = new (window.AudioContext ||
+    window.webkitAudioContext)({sampleRate: 16000});
+  private outputAudioContext = new (window.AudioContext ||
+    window.webkitAudioContext)({sampleRate: 24000});
+  @state() inputNode = this.inputAudioContext.createGain();
+  @state() outputNode = this.outputAudioContext.createGain();
+  private nextStartTime = 0;
+  private mediaStream: MediaStream;
+  private sourceNode: AudioBufferSourceNode;
+  private scriptProcessorNode: ScriptProcessorNode;
+  private sources = new Set<AudioBufferSourceNode>();
 
-type AppState =
-  | 'IDLE'
-  | 'INITIALIZING'
-  | 'LISTENING'
-  | 'AWAITING_CONFIRMATION'
-  | 'SENDING'
-  | 'CONFIRMED'
-  | 'ERROR';
+  static styles = css`
+    #status {
+      position: absolute;
+      bottom: 5vh;
+      left: 0;
+      right: 0;
+      z-index: 10;
+      text-align: center;
+    }
 
-interface PendingTransaction {
-  amount: number;
-  currency: string;
-  recipient: string;
-}
+    .controls {
+      z-index: 10;
+      position: absolute;
+      bottom: 10vh;
+      left: 0;
+      right: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 10px;
 
-export default function Home() {
-  const [appState, setAppState] = useState<AppState>('IDLE');
-  const [transcript, setTranscript] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const [pendingTx, setPendingTx] = useState<PendingTransaction | null>(null);
+      button {
+        outline: none;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        color: white;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.1);
+        width: 64px;
+        height: 64px;
+        cursor: pointer;
+        font-size: 24px;
+        padding: 0;
+        margin: 0;
 
-  const sessionRef = useRef<Session | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const scriptProcessorNodeRef = useRef<ScriptProcessorNode | null>(null);
-  const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const videoRef = useRef<HTMLVideoElement>(null); // Keep for visual display
-
-  useEffect(() => {
-    async function initialize() {
-      setAppState('INITIALIZING');
-      try {
-        const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
-        if (!apiKey) {
-          throw new Error('NEXT_PUBLIC_GEMINI_API_KEY not found.');
+        &:hover {
+          background: rgba(255, 255, 255, 0.2);
         }
+      }
 
-        const client = new GoogleGenAI({ apiKey });
+      button[disabled] {
+        display: none;
+      }
+    }
+  `;
 
-        const systemInstruction = `You are a voice-activated financial assistant. Your primary function is to understand and process transaction commands.
-When you detect a clear intent to make a transaction, you must respond with a JSON object containing:
-- "intent": "TRANSACTION"
-- "amount": The numerical amount.
-- "currency": The currency or token name (e.g., "USD", "FLOW").
-- "recipient": The recipient's name (e.g., "vitalik.eth", "user.find").
+  constructor() {
+    super();
+    this.initClient();
+  }
 
-Example: If the user says "send 50 flow to sarah.find", you must output:
-{"intent":"TRANSACTION", "amount":50, "currency":"FLOW", "recipient":"sarah.find"}
+  private initAudio() {
+    this.nextStartTime = this.outputAudioContext.currentTime;
+  }
 
-If the user gives a confirmation command like "yes" or "confirm", you must respond with:
-{"intent":"CONFIRMATION", "decision":"yes"}
+  private async initClient() {
+    this.initAudio();
 
-If the user gives a cancellation command like "no" or "cancel", you must respond with:
-{"intent":"CONFIRMATION", "decision":"no"}
+    this.client = new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY,
+    });
 
-For any other speech, just provide a direct transcript. Do not be conversational.
-Only respond with JSON when a clear intent is detected.`;
+    this.outputNode.connect(this.outputAudioContext.destination);
 
-        sessionRef.current = await client.live.connect({
-          model: 'gemini-2.5-flash-preview-native-audio-dialog',
-          config: {
-            // Reverted to audio-only request and text response
-            requestModalities: [Modality.AUDIO],
-            responseModalities: [Modality.TEXT],
-            speechConfig: { languageCode: 'en-US' },
-            systemInstruction: { parts: [{ text: systemInstruction }] },
+    this.initSession();
+  }
+
+  private async initSession() {
+    const model = 'gemini-2.5-flash-preview-native-audio-dialog';
+
+    try {
+      this.session = await this.client.live.connect({
+        model: model,
+        callbacks: {
+          onopen: () => {
+            this.updateStatus('Opened');
           },
-          callbacks: {
-            onopen: () => {
-              console.log('GEMINI LIVE SESSION OPENED');
-            },
-            onmessage: (message: LiveServerMessage) => {
-              console.log('onmessage received:', message);
-              const text = message.serverContent?.modelTurn?.parts[0]?.text;
-              if (text) {
-                handleGeminiResponse(text);
+          onmessage: async (message: LiveServerMessage) => {
+            const audio =
+              message.serverContent?.modelTurn?.parts[0]?.inlineData;
+
+            if (audio) {
+              this.nextStartTime = Math.max(
+                this.nextStartTime,
+                this.outputAudioContext.currentTime,
+              );
+
+              const audioBuffer = await decodeAudioData(
+                decode(audio.data),
+                this.outputAudioContext,
+                24000,
+                1,
+              );
+              const source = this.outputAudioContext.createBufferSource();
+              source.buffer = audioBuffer;
+              source.connect(this.outputNode);
+              source.addEventListener('ended', () =>{
+                this.sources.delete(source);
+              });
+
+              source.start(this.nextStartTime);
+              this.nextStartTime = this.nextStartTime + audioBuffer.duration;
+              this.sources.add(source);
+            }
+
+            const interrupted = message.serverContent?.interrupted;
+            if(interrupted) {
+              for(const source of this.sources.values()) {
+                source.stop();
+                this.sources.delete(source);
               }
-            },
-            onerror: (e: Error) => {
-              console.error('Live API Error:', e);
-              setError('An API error occurred. Please check the console.');
-              setAppState('ERROR');
-            },
-            onclose: () => {
-              console.log('Live API session closed.');
-            },
+              this.nextStartTime = 0;
+            }
           },
-        });
-
-        // --- Audio & Video Display Setup ---
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: { sampleRate: 16000, channelCount: 1 },
-          video: true // Keep video for display purposes
-        });
-
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
-
-        // --- Audio Processor ---
-        const context = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-        audioContextRef.current = context;
-        const source = context.createMediaStreamSource(stream);
-        mediaStreamSourceRef.current = source;
-        const processor = context.createScriptProcessor(1024, 1, 1);
-        scriptProcessorNodeRef.current = processor;
-        processor.onaudioprocess = (audioProcessingEvent) => {
-          console.log('onaudioprocess triggered');
-          if (sessionRef.current?.connectionState !== 'OPEN') {
-            console.log(`Skipping audio processing: connection state is ${sessionRef.current?.connectionState}`);
-            return;
-          }
-          const inputBuffer = audioProcessingEvent.inputBuffer;
-          const pcmData = inputBuffer.getChannelData(0);
-          console.log(`PCM data length: ${pcmData.length}`);
-          const mediaBlob = createWavBlob(pcmData, context.sampleRate);
-          sessionRef.current?.sendRealtimeInput({ media: mediaBlob });
-        };
-        source.connect(processor);
-        processor.connect(context.destination);
-
-        setAppState('LISTENING');
-
-      } catch (err: any) {
-        console.error("Initialization Error:", err);
-        setError(err.message || "An unknown error occurred during initialization.");
-        setAppState('ERROR');
-      }
-    }
-
-    initialize();
-
-    return () => {
-      mediaStreamSourceRef.current?.disconnect();
-      scriptProcessorNodeRef.current?.disconnect();
-      audioContextRef.current?.close();
-      sessionRef.current?.close();
-    };
-  }, []);
-
-  const handleGeminiResponse = (text: string) => {
-    setTranscript(text);
-    try {
-      const jsonResponse = JSON.parse(text);
-      if (jsonResponse.intent === 'TRANSACTION' && appState !== 'AWAITING_CONFIRMATION') {
-        setPendingTx({
-          amount: jsonResponse.amount,
-          currency: jsonResponse.currency,
-          recipient: jsonResponse.recipient,
-        });
-        setAppState('AWAITING_CONFIRMATION');
-      } else if (jsonResponse.intent === 'CONFIRMATION') {
-        if (appState === 'AWAITING_CONFIRMATION') {
-          if (jsonResponse.decision === 'yes') {
-            executeTransaction();
-          } else {
-            setPendingTx(null);
-            setAppState('LISTENING');
-          }
-        }
-      }
-    } catch (e) {
-      // Not a JSON response
-    }
-  };
-
-  const executeTransaction = async () => {
-    if (!pendingTx) return;
-    setAppState('SENDING');
-    setTranscript(`Sending ${pendingTx.amount} ${pendingTx.currency} to ${pendingTx.recipient}...`);
-    try {
-      const endpoint = pendingTx.currency.toUpperCase().includes('USD') ? '/api/transact/evm' : '/api/transact/flow';
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(pendingTx),
+          onerror: (e: ErrorEvent) => {
+            this.updateError(e.message);
+          },
+          onclose: (e: CloseEvent) => {
+            this.updateStatus('Close:' + e.reason);
+          },
+        },
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {prebuiltVoiceConfig: {voiceName: 'Orus'}},
+            // languageCode: 'en-GB'
+          },
+        },
       });
-      const result = await response.json();
-      if (!response.ok) {
-        throw new Error(result.error || 'Transaction failed');
-      }
-      setAppState('CONFIRMED');
-      const txIdentifier = result.txHash || result.txId;
-      setTranscript(`Success! Tx: ${txIdentifier.substring(0, 10)}...`);
-      setTimeout(() => {
-        setPendingTx(null);
-        setAppState('LISTENING');
-        setTranscript('');
-      }, 8000);
-    } catch (err: any) {
-      console.error("Transaction Execution Error:", err);
-      setError(err.message);
-      setAppState('ERROR');
+    } catch (e) {
+      console.error(e);
     }
-  };
-
-  return (
-    <main style={styles.main}>
-      <div style={styles.videoContainer}>
-        <video ref={videoRef} autoPlay muted playsInline style={styles.video} />
-        <div style={styles.overlay}>
-          <div style={styles.statusBox}>
-            <p style={styles.statusText}><strong>STATUS:</strong> {appState}</p>
-          </div>
-          <div style={styles.transcriptBox}>
-            <p>{transcript}</p>
-          </div>
-        </div>
-      </div>
-
-      {appState === 'AWAITING_CONFIRMATION' && pendingTx && (
-        <div style={styles.modal}>
-          <div style={styles.modalContent}>
-            <h2>Confirm Transaction</h2>
-            <p style={styles.confirmationText}>
-              Send <span style={styles.highlight}>{pendingTx.amount} {pendingTx.currency}</span> to <span style={styles.highlight}>{pendingTx.recipient}</span>?
-            </p>
-            <p><em>(Say "Yes" to confirm or "No" to cancel)</em></p>
-          </div>
-        </div>
-      )}
-
-      {(appState === 'CONFIRMED' || appState === 'SENDING') && (
-         <div style={styles.modal}>
-          <div style={styles.modalContent}>
-            <h2>{appState === 'SENDING' ? 'Sending...' : 'Transaction Confirmed!'}</h2>
-            <p>{transcript}</p>
-          </div>
-        </div>
-      )}
-
-      {appState === 'ERROR' && (
-         <div style={styles.modal}>
-          <div style={styles.modalContent}>
-            <h2>Error</h2>
-            <p>{error}</p>
-            <button onClick={() => window.location.reload()} style={styles.button}>Retry</button>
-          </div>
-        </div>
-      )}
-    </main>
-  );
-}
-
-// Basic inline styles for layout
-const styles: { [key: string]: React.CSSProperties } = {
-  main: {
-    width: '100vw',
-    height: '100vh',
-    display: 'flex',
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#000',
-    color: 'white',
-    fontFamily: 'monospace'
-  },
-  videoContainer: {
-    position: 'relative',
-    width: '80%',
-    maxWidth: '960px',
-    borderRadius: '16px',
-    overflow: 'hidden',
-    boxShadow: '0 10px 30px rgba(0,0,0,0.5)',
-    border: '1px solid #333',
-    backgroundColor: '#111'
-  },
-  video: {
-    width: '100%',
-    display: 'block',
-  },
-  overlay: {
-    position: 'absolute',
-    bottom: '0',
-    left: '0',
-    width: '100%',
-    padding: '20px',
-    boxSizing: 'border-box',
-    background: 'linear-gradient(to top, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0) 100%)',
-  },
-  statusBox: {
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    borderRadius: '8px',
-    padding: '5px 15px',
-    marginBottom: '10px',
-    width: 'fit-content',
-    border: '1px solid #444'
-  },
-  statusText: {
-    margin: 0,
-    fontSize: '1rem',
-    fontWeight: 'bold',
-    textTransform: 'uppercase'
-  },
-  transcriptBox: {
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    borderRadius: '8px',
-    padding: '15px',
-    minHeight: '50px',
-    border: '1px solid #444',
-    fontSize: '1.2rem'
-  },
-  modal: {
-    position: 'fixed',
-    top: 0,
-    left: 0,
-    width: '100%',
-    height: '100%',
-    backgroundColor: 'rgba(0, 0, 0, 0.8)',
-    display: 'flex',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 100,
-  },
-  modalContent: {
-    backgroundColor: '#1a1a1a',
-    padding: '40px',
-    borderRadius: '16px',
-    textAlign: 'center',
-    boxShadow: '0 5px 20px rgba(0,0,0,0.5)',
-    border: '1px solid #555',
-    maxWidth: '80%',
-  },
-  confirmationText: {
-    fontSize: '1.5rem',
-    margin: '20px 0',
-  },
-  highlight: {
-    color: '#4dff94',
-    fontWeight: 'bold',
-  },
-  button: {
-    marginTop: '20px',
-    padding: '10px 20px',
-    borderRadius: '8px',
-    border: '1px solid #555',
-    backgroundColor: '#333',
-    color: 'white',
-    cursor: 'pointer',
-    fontSize: '1rem'
   }
-};
+
+  private updateStatus(msg: string) {
+    this.status = msg;
+  }
+
+  private updateError(msg: string) {
+    this.error = msg;
+  }
+
+  private async startRecording() {
+    if (this.isRecording) {
+      return;
+    }
+
+    this.inputAudioContext.resume();
+
+    this.updateStatus('Requesting microphone access...');
+
+    try {
+      this.mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: false,
+      });
+
+      this.updateStatus('Microphone access granted. Starting capture...');
+
+      this.sourceNode = this.inputAudioContext.createMediaStreamSource(
+        this.mediaStream,
+      );
+      this.sourceNode.connect(this.inputNode);
+
+      const bufferSize = 256;
+      this.scriptProcessorNode = this.inputAudioContext.createScriptProcessor(
+        bufferSize,
+        1,
+        1,
+      );
+
+      this.scriptProcessorNode.onaudioprocess = (audioProcessingEvent) => {
+        if (!this.isRecording) return;
+
+        const inputBuffer = audioProcessingEvent.inputBuffer;
+        const pcmData = inputBuffer.getChannelData(0);
+
+        this.session.sendRealtimeInput({media: createBlob(pcmData)});
+      };
+
+      this.sourceNode.connect(this.scriptProcessorNode);
+      this.scriptProcessorNode.connect(this.inputAudioContext.destination);
+
+      this.isRecording = true;
+      this.updateStatus('🔴 Recording... Capturing PCM chunks.');
+    } catch (err) {
+      console.error('Error starting recording:', err);
+      this.updateStatus(`Error: ${err.message}`);
+      this.stopRecording();
+    }
+  }
+
+  private stopRecording() {
+    if (!this.isRecording && !this.mediaStream && !this.inputAudioContext)
+      return;
+
+    this.updateStatus('Stopping recording...');
+
+    this.isRecording = false;
+
+    if (this.scriptProcessorNode && this.sourceNode && this.inputAudioContext) {
+      this.scriptProcessorNode.disconnect();
+      this.sourceNode.disconnect();
+    }
+
+    this.scriptProcessorNode = null;
+    this.sourceNode = null;
+
+    if (this.mediaStream) {
+      this.mediaStream.getTracks().forEach((track) => track.stop());
+      this.mediaStream = null;
+    }
+
+    this.updateStatus('Recording stopped. Click Start to begin again.');
+  }
+
+  private reset() {
+    this.session?.close();
+    this.initSession();
+    this.updateStatus('Session cleared.');
+  }
+
+  render() {
+    return html`
+      <div>
+        <div class="controls">
+          <button
+            id="resetButton"
+            @click=${this.reset}
+            ?disabled=${this.isRecording}>
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              height="40px"
+              viewBox="0 -960 960 960"
+              width="40px"
+              fill="#ffffff">
+              <path
+                d="M480-160q-134 0-227-93t-93-227q0-134 93-227t227-93q69 0 132 28.5T720-690v-110h80v280H520v-80h168q-32-56-87.5-88T480-720q-100 0-170 70t-70 170q0 100 70 170t170 70q77 0 139-44t87-116h84q-28 106-114 173t-196 67Z" />
+            </svg>
+          </button>
+          <button
+            id="startButton"
+            @click=${this.startRecording}
+            ?disabled=${this.isRecording}>
+            <svg
+              viewBox="0 0 100 100"
+              width="32px"
+              height="32px"
+              fill="#c80000"
+              xmlns="http://www.w3.org/2000/svg">
+              <circle cx="50" cy="50" r="50" />
+            </svg>
+          </button>
+          <button
+            id="stopButton"
+            @click=${this.stopRecording}
+            ?disabled=${!this.isRecording}>
+            <svg
+              viewBox="0 0 100 100"
+              width="32px"
+              height="32px"
+              fill="#000000"
+              xmlns="http://www.w3.org/2000/svg">
+              <rect x="0" y="0" width="100" height="100" rx="15" />
+            </svg>
+          </button>
+        </div>
+
+        <div id="status"> ${this.error} </div>
+        <gdm-live-audio-visuals-3d
+          .inputNode=${this.inputNode}
+          .outputNode=${this.outputNode}></gdm-live-audio-visuals-3d>
+      </div>
+    `;
+  }
+}
