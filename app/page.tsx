@@ -4,49 +4,29 @@ import { useState, useEffect, useRef } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality, Session } from '@google/genai';
 
 // --- Helper function to create a WAV Blob ---
-// This is a simplified version of what a utility library might provide.
-// It creates a WAV file header and combines it with the raw PCM data.
 const createWavBlob = (pcmData: Float32Array, sampleRate: number): Blob => {
   const header = new ArrayBuffer(44);
   const view = new DataView(header);
-
-  // RIFF identifier
   view.setUint32(0, 1380533830, false); // "RIFF"
-  // file length
   view.setUint32(4, 36 + pcmData.length * 2, true);
-  // RIFF type
   view.setUint32(8, 1463899717, false); // "WAVE"
-  // format chunk identifier
   view.setUint32(12, 1718449184, false); // "fmt "
-  // format chunk length
   view.setUint32(16, 16, true);
-  // sample format (raw)
   view.setUint16(20, 1, true);
-  // channel count
   view.setUint16(22, 1, true);
-  // sample rate
   view.setUint32(24, sampleRate, true);
-  // byte rate (sample rate * block align)
   view.setUint32(28, sampleRate * 2, true);
-  // block align (channel count * bytes per sample)
   view.setUint16(32, 2, true);
-  // bits per sample
   view.setUint16(34, 16, true);
-  // data chunk identifier
   view.setUint32(36, 1684108385, false); // "data"
-  // data chunk length
   view.setUint32(40, pcmData.length * 2, true);
-
-  // Convert PCM to 16-bit
   const pcm16 = new Int16Array(pcmData.length);
   for (let i = 0; i < pcmData.length; i++) {
     const s = Math.max(-1, Math.min(1, pcmData[i]));
     pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
   }
-
   return new Blob([view, pcm16], { type: 'audio/wav' });
 };
-
 
 // --- React Component ---
 
@@ -75,6 +55,9 @@ export default function Home() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const scriptProcessorNodeRef = useRef<ScriptProcessorNode | null>(null);
   const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const videoIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     async function initialize() {
@@ -87,7 +70,7 @@ export default function Home() {
 
         const client = new GoogleGenAI({ apiKey });
 
-        const systemInstruction = `You are a voice-activated financial assistant. Your primary function is to understand and process transaction commands.
+        const systemInstruction = `You are a voice-activated financial assistant. Your primary function is to understand and process transaction commands based on audio and video context.
 When you detect a clear intent to make a transaction, you must respond with a JSON object containing:
 - "intent": "TRANSACTION"
 - "amount": The numerical amount.
@@ -107,16 +90,12 @@ For any other speech, just provide a direct transcript. Do not be conversational
 Only respond with JSON when a clear intent is detected.`;
 
         sessionRef.current = await client.live.connect({
-          model: 'gemini-2.5-flash-preview-native-audio-dialog',
+          model: 'gemini-2.5-flash-preview-native-audio-dialog', // Note: Model may need to change for video
           config: {
-            // Request text responses, not audio
+            requestModalities: [Modality.AUDIO, Modality.VIDEO],
             responseModalities: [Modality.TEXT],
-            speechConfig: {
-              languageCode: 'en-US',
-            },
-            systemInstruction: {
-              parts: [{ text: systemInstruction }],
-            },
+            speechConfig: { languageCode: 'en-US' },
+            systemInstruction: { parts: [{ text: systemInstruction }] },
           },
           callbacks: {
             onmessage: (message: LiveServerMessage) => {
@@ -136,27 +115,50 @@ Only respond with JSON when a clear intent is detected.`;
           },
         });
 
-        // --- Audio Processing Setup ---
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        
+        // --- Audio & Video Processing Setup ---
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { sampleRate: 16000, channelCount: 1 },
+          video: { width: 640, height: 480, frameRate: 5 } // Lower frame rate for performance
+        });
+
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+
+        // --- Audio Processor ---
         const context = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
         audioContextRef.current = context;
-
         const source = context.createMediaStreamSource(stream);
         mediaStreamSourceRef.current = source;
-
         const processor = context.createScriptProcessor(1024, 1, 1);
         scriptProcessorNodeRef.current = processor;
-
         processor.onaudioprocess = (audioProcessingEvent) => {
+          if (sessionRef.current?.connectionState !== 'OPEN') return;
           const inputBuffer = audioProcessingEvent.inputBuffer;
           const pcmData = inputBuffer.getChannelData(0);
           const mediaBlob = createWavBlob(pcmData, context.sampleRate);
           sessionRef.current?.sendRealtimeInput({ media: mediaBlob });
         };
-
         source.connect(processor);
         processor.connect(context.destination);
+        
+        // --- Video Processor ---
+        videoIntervalRef.current = setInterval(() => {
+          if (sessionRef.current?.connectionState !== 'OPEN' || !videoRef.current || !canvasRef.current) {
+            return;
+          }
+          const canvas = canvasRef.current;
+          const video = videoRef.current;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            canvas.toBlob((blob) => {
+              if (blob && sessionRef.current?.connectionState === 'OPEN') {
+                sessionRef.current?.sendRealtimeInput({ media: blob });
+              }
+            }, 'image/jpeg', 0.7);
+          }
+        }, 200); // 5 fps (1000ms / 5)
 
         setAppState('LISTENING');
 
@@ -170,6 +172,9 @@ Only respond with JSON when a clear intent is detected.`;
     initialize();
 
     return () => {
+      if (videoIntervalRef.current) {
+        clearInterval(videoIntervalRef.current);
+      }
       mediaStreamSourceRef.current?.disconnect();
       scriptProcessorNodeRef.current?.disconnect();
       audioContextRef.current?.close();
@@ -199,7 +204,7 @@ Only respond with JSON when a clear intent is detected.`;
         }
       }
     } catch (e) {
-      // Not a JSON response, just a regular transcript.
+      // Not a JSON response
     }
   };
 
@@ -208,15 +213,7 @@ Only respond with JSON when a clear intent is detected.`;
     setAppState('SENDING');
     setTranscript(`Sending ${pendingTx.amount} ${pendingTx.currency} to ${pendingTx.recipient}...`);
     try {
-      let endpoint = '';
-      const currency = pendingTx.currency.toUpperCase();
-      if (currency === 'USD' || currency === 'PYUSD') {
-        endpoint = '/api/transact/evm';
-      } else if (currency === 'FLOW') {
-        endpoint = '/api/transact/flow';
-      } else {
-        throw new Error(`Unsupported currency: ${pendingTx.currency}`);
-      }
+      const endpoint = pendingTx.currency.toUpperCase().includes('USD') ? '/api/transact/evm' : '/api/transact/flow';
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -244,8 +241,8 @@ Only respond with JSON when a clear intent is detected.`;
   return (
     <main style={styles.main}>
       <div style={styles.videoContainer}>
-        {/* The video element is no longer used for streaming to Gemini, but can be a visual element */}
-        <video autoPlay muted playsInline style={styles.video} />
+        <video ref={videoRef} autoPlay muted playsInline style={styles.video} />
+        <canvas ref={canvasRef} width="640" height="480" style={{ display: 'none' }} />
         <div style={styles.overlay}>
           <div style={styles.statusBox}>
             <p style={styles.statusText}><strong>STATUS:</strong> {appState}</p>
@@ -315,7 +312,6 @@ const styles: { [key: string]: React.CSSProperties } = {
   video: {
     width: '100%',
     display: 'block',
-    opacity: 0.5, // Video is just for show now
   },
   overlay: {
     position: 'absolute',
