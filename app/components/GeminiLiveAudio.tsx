@@ -17,6 +17,8 @@ export default function GeminiLiveAudio() {
   const [wakeWordDetected, setWakeWordDetected] = useState(false);
   const [transactionResult, setTransactionResult] = useState<any>(null);
   const [showTransactionUI, setShowTransactionUI] = useState(false);
+  const [processingPurchase, setProcessingPurchase] = useState(false);
+  const lastPurchaseRef = useRef<{ item: string; timestamp: number } | null>(null);
 
   const clientRef = useRef<GoogleGenAI | null>(null);
   const sessionRef = useRef<Session | null>(null);
@@ -138,8 +140,37 @@ export default function GeminiLiveAudio() {
                       break;
                       
                     case 'purchase_item':
-                      // Directly process the purchase without confirmation
+                      // Prevent duplicate purchases
                       const purchaseArgs = functionCall.args;
+                      const now = Date.now();
+                      
+                      // Check if same item was purchased within last 10 seconds
+                      if (lastPurchaseRef.current && 
+                          lastPurchaseRef.current.item === purchaseArgs?.item_name &&
+                          (now - lastPurchaseRef.current.timestamp) < 10000) {
+                        console.log('Duplicate purchase detected, skipping');
+                        response = { 
+                          success: false, 
+                          message: 'Purchase already in progress',
+                          duplicate: true
+                        };
+                        break;
+                      }
+                      
+                      // Check if another purchase is processing
+                      if (processingPurchase) {
+                        console.log('Another purchase is processing, skipping');
+                        response = { 
+                          success: false, 
+                          message: 'Another purchase is being processed',
+                          busy: true
+                        };
+                        break;
+                      }
+                      
+                      setProcessingPurchase(true);
+                      lastPurchaseRef.current = { item: purchaseArgs?.item_name || '', timestamp: now };
+                      
                       const endpoint = purchaseArgs?.currency === 'FLOW' 
                         ? '/api/transfer/flow' 
                         : '/api/transfer/pyusd';
@@ -172,11 +203,6 @@ export default function GeminiLiveAudio() {
                           });
                           setShowTransactionUI(true);
                           
-                          // Auto-hide after 5 seconds
-                          setTimeout(() => {
-                            setShowTransactionUI(false);
-                            setTransactionResult(null);
-                          }, 5000);
                           
                           response = { 
                             success: true, 
@@ -197,11 +223,6 @@ export default function GeminiLiveAudio() {
                           });
                           setShowTransactionUI(true);
                           
-                          // Auto-hide after 5 seconds
-                          setTimeout(() => {
-                            setShowTransactionUI(false);
-                            setTransactionResult(null);
-                          }, 5000);
                           
                           response = { 
                             error: result.error || 'Transfer failed',
@@ -234,6 +255,11 @@ export default function GeminiLiveAudio() {
                           error: 'Transfer failed',
                           details: errorMessage
                         };
+                      } finally {
+                        // Reset processing flag after a delay
+                        setTimeout(() => {
+                          setProcessingPurchase(false);
+                        }, 2000);
                       }
                       break;
                       
@@ -822,7 +848,21 @@ export default function GeminiLiveAudio() {
       {/* Transaction Result Indicator */}
       {showTransactionUI && transactionResult && (
         <div className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-50">
-          <div className={`bg-slate-800/95 border-2 ${transactionResult.success ? 'border-green-500/50' : 'border-red-500/50'} rounded-2xl p-8 max-w-md backdrop-blur-sm shadow-2xl`}>
+          <div className={`bg-slate-800/95 border-2 ${transactionResult.success ? 'border-green-500/50' : 'border-red-500/50'} rounded-2xl p-8 max-w-md backdrop-blur-sm shadow-2xl relative`}>
+            {/* Close button */}
+            <button
+              onClick={() => {
+                setShowTransactionUI(false);
+                setTransactionResult(null);
+              }}
+              className="absolute top-4 right-4 w-8 h-8 rounded-full bg-slate-700/50 hover:bg-slate-600/50 flex items-center justify-center transition-colors"
+              aria-label="Close"
+            >
+              <svg className="w-4 h-4 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+            
             <div className="flex flex-col items-center space-y-4">
               <div className={`w-16 h-16 rounded-full ${transactionResult.success ? 'bg-green-500/20' : 'bg-red-500/20'} flex items-center justify-center`}>
                 {transactionResult.success ? (
@@ -864,9 +904,6 @@ export default function GeminiLiveAudio() {
                   <p className="text-xs text-red-400">{transactionResult.details}</p>
                 </div>
               )}
-              <div className="text-xs text-slate-500 animate-pulse">
-                Auto-closing in 5 seconds...
-              </div>
             </div>
           </div>
         </div>
