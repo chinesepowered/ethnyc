@@ -890,6 +890,12 @@ export default function GeminiLiveAudio() {
                 <p className="text-slate-400 text-sm">
                   {transactionResult.success ? `Sent to ${transactionResult.vendor}` : transactionResult.error}
                 </p>
+                {/* Show ENS name for Arbitrum Sepolia transactions */}
+                {transactionResult.success && transactionResult.ensName && transactionResult.currency === 'PYUSD' && (
+                  <p className="text-xs text-slate-500">
+                    ENS: {transactionResult.ensName}
+                  </p>
+                )}
               </div>
               {transactionResult.success && transactionResult.transactionHash && (
                 <div className="mt-4 p-3 bg-slate-900/50 rounded-lg w-full">
