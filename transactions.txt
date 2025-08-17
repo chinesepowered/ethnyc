@@ -1,0 +1,5 @@
+Paypal USD transaction for buying $1 Coco Cola
+https://sepolia.arbiscan.io/tx/0x4a9d83dc310aa24d10e4dd8f8c1f582f9b84f18815c25d09e422061520658fb3
+
+Flow transaction for buying USB-C charger
+https://testnet.flowscan.io/tx/2567a49b676a132231497a0db10bd6bc53a49a91982f715387a5258411f98b1a
