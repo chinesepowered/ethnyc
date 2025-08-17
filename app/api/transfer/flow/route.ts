@@ -1,11 +1,11 @@
 import { NextResponse } from 'next/server';
 import { getRecipientByVendor } from '@/app/data/store';
 import * as fcl from '@onflow/fcl';
-import { SHA3 } from 'sha3';
+import { createHash } from 'crypto';
 import { ec as EC } from 'elliptic';
 
-// Initialize elliptic curve for Flow (P256)
-const ec = new EC('p256');
+// Initialize elliptic curve for Flow - using secp256k1 based on your account settings
+const ec = new EC('secp256k1');
 
 // Configure FCL for Flow testnet
 fcl.config({
@@ -60,35 +60,102 @@ transaction(amount: UFix64, to: Address) {
 
 // Helper function to sign transaction with private key
 function signWithKey(privateKey: string, message: Buffer): Buffer {
-  const key = ec.keyFromPrivate(Buffer.from(privateKey, 'hex'));
-  const sig = key.sign(message);
+  // Remove 0x prefix if present
+  const cleanKey = privateKey.replace(/^0x/, '');
+  
+  // Create key from private key
+  const key = ec.keyFromPrivate(Buffer.from(cleanKey, 'hex'));
+  
+  // Hash with SHA256 (SHA2-256)
+  const hash = createHash('sha256').update(message).digest();
+  
+  // Sign the hash
+  const sig = key.sign(hash);
+  
+  // Get signature in Flow format
+  // Flow expects r and s values as 32-byte big-endian buffers
   const n = 32;
   const r = sig.r.toArrayLike(Buffer, 'be', n);
   const s = sig.s.toArrayLike(Buffer, 'be', n);
+  
   return Buffer.concat([r, s]);
 }
 
 // Create authorization function for FCL
 const authorization = (account: any) => {
-  const privateKey = process.env.FLOW_PRIVATE_KEY;
-  const accountAddress = process.env.FLOW_ACCOUNT_ADDRESS;
+  let privateKey = process.env.FLOW_PRIVATE_KEY;
+  let accountAddress = process.env.FLOW_ACCOUNT_ADDRESS;
   
   if (!privateKey || !accountAddress) {
     throw new Error('Flow configuration incomplete');
   }
 
+  // Clean private key - remove 0x prefix if present
+  privateKey = privateKey.replace(/^0x/, '');
+  
+  // Validate private key format (should be 64 hex chars for P256)
+  if (!/^[a-fA-F0-9]{64}$/.test(privateKey)) {
+    console.error('Invalid Flow private key format');
+    throw new Error('Invalid Flow private key format - should be 64 hex characters');
+  }
+
+  // Ensure address has 0x prefix and is properly formatted
+  if (!accountAddress.startsWith('0x')) {
+    accountAddress = '0x' + accountAddress;
+  }
+  
+  // Validate Flow address format
+  const flowAddressRegex = /^0x[a-fA-F0-9]{16}$/;
+  if (!flowAddressRegex.test(accountAddress)) {
+    console.error(`Invalid Flow sender address format: ${accountAddress}`);
+    throw new Error(`Invalid Flow address format for sender: ${accountAddress}`);
+  }
+
+  console.log(`Using Flow sender address: ${accountAddress}`);
+
+  // Default to key index 0, but allow override via environment variable
+  const keyId = process.env.FLOW_KEY_INDEX ? parseInt(process.env.FLOW_KEY_INDEX) : 0;
+  
+  // Get the public key from the private key for verification
+  const cleanPrivateKey = privateKey.replace(/^0x/, '');
+  const keyPair = ec.keyFromPrivate(Buffer.from(cleanPrivateKey, 'hex'));
+  const publicKey = keyPair.getPublic('hex');
+  console.log('Public key:', publicKey);
+  
+  const signingFunction = async (signable: any) => {
+    console.log('Signing message for Flow transaction');
+    console.log('Signable object:', JSON.stringify(signable, null, 2));
+    
+    // FCL provides the message that needs to be signed
+    const messageHex = signable.message;
+    
+    // Sign using SHA2-256 hash (your account uses SHA2_256, not SHA3_256)
+    const hash = createHash('sha256')
+      .update(Buffer.from(messageHex, 'hex'))
+      .digest();
+    
+    // Sign the hash
+    const sig = keyPair.sign(hash);
+    
+    // Get signature in Flow format (r + s concatenated)
+    const r = sig.r.toArrayLike(Buffer, 'be', 32);
+    const s = sig.s.toArrayLike(Buffer, 'be', 32);
+    const signature = Buffer.concat([r, s]).toString('hex');
+    
+    console.log('Generated signature:', signature);
+    
+    return {
+      addr: fcl.withPrefix(accountAddress),
+      keyId: keyId,
+      signature: signature
+    };
+  };
+  
   return {
     ...account,
-    addr: accountAddress,
-    keyId: 0, // Assuming key index 0
-    signingFunction: async (signable: any) => {
-      const signature = signWithKey(privateKey, Buffer.from(signable.message, 'hex'));
-      return {
-        addr: accountAddress,
-        keyId: 0,
-        signature: signature.toString('hex')
-      };
-    }
+    addr: fcl.withPrefix(accountAddress),
+    keyId: keyId,
+    signingFunction
   };
 };
 
@@ -139,6 +206,14 @@ export async function POST(request: Request) {
     
     console.log(`Initiating Flow Actions transfer: ${amount} FLOW to ${recipient} (${recipientData.flowAddress})`);
     
+    // Log sender configuration for debugging
+    const flowSenderAddress = process.env.FLOW_ACCOUNT_ADDRESS;
+    console.log('Flow sender configuration:', {
+      address: flowSenderAddress?.startsWith('0x') ? flowSenderAddress : '0x' + flowSenderAddress,
+      hasPrivateKey: !!process.env.FLOW_PRIVATE_KEY,
+      keyIndex: process.env.FLOW_KEY_INDEX || '0'
+    });
+    
     try {
       // Build and send the transaction using Flow Actions pattern
       const transactionId = await fcl.mutate({
@@ -164,31 +239,11 @@ export async function POST(request: Request) {
         throw new Error(`Transaction failed with status code: ${transaction.statusCode}`);
       }
       
-      // Try to resolve ENS name for the recipient address (if they have one)
-      let ensName = null;
-      try {
-        const ensResponse = await fetch(`${process.env.NEXT_PUBLIC_URL || 'http://localhost:3000'}/api/ens/resolve`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            address: recipientData.pyusdAddress, // Use PYUSD address for ENS lookup
-            chainId: 421614 // Arbitrum Sepolia
-          })
-        });
-        const ensData = await ensResponse.json();
-        if (ensData.success) {
-          ensName = ensData.ensName;
-        }
-      } catch (error) {
-        console.log('ENS resolution failed, continuing without ENS name');
-      }
-      
       return NextResponse.json({
         success: true,
         message: `Successfully transferred ${amount} FLOW to ${recipient}`,
         transactionId: transactionId,
         recipient: recipientData.flowAddress,
-        ensName: ensName,
         blockId: transaction.blockId,
         status: transaction.status,
         statusCode: transaction.statusCode,

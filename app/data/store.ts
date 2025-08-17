@@ -4,7 +4,7 @@ export const storeInventory = [
   { vendor: 'Amazon', name: 'Coke Can', price: 1.00, currency: 'PYUSD' }, // Alias for Coca Cola
   { vendor: 'Amazon', name: 'Pepsi Can', price: 1.00, currency: 'PYUSD' },
   { vendor: 'Amazon', name: 'Sprite Can', price: 1.00, currency: 'PYUSD' },
-  { vendor: 'BestBuy', name: 'USB-C Charger', price: 5.00, currency: 'PYUSD' },
+  { vendor: 'BestBuy', name: 'USB-C Charger', price: 5.00, currency: 'FLOW' },
   { vendor: 'BestBuy', name: 'Phone Charger', price: 2.00, currency: 'FLOW' },
   { vendor: 'BestBuy', name: 'Laptop Charger', price: 8.00, currency: 'PYUSD' },
   { vendor: 'Walmart', name: 'Water Bottle', price: 5.00, currency: 'PYUSD' },
