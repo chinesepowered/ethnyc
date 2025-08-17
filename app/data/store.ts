@@ -17,22 +17,22 @@ export const storeInventory = [
 export const authorizedRecipients = [
   { 
     name: 'Amazon', 
-    pyusdAddress: '0x6Bd07000C5F746af69BEe7f151eb30285a6678B2',
+    pyusdAddress: '0xe3B24b93C18eD1B7eEa9e07b3B03D03259f3942e',
     flowAddress: '0xecb8d6f1b3a8639f'
   },
   { 
     name: 'BestBuy', 
-    pyusdAddress: '0x6Bd07000C5F746af69BEe7f151eb30285a6678B2',
+    pyusdAddress: '0xe3B24b93C18eD1B7eEa9e07b3B03D03259f3942e',
     flowAddress: '0xecb8d6f1b3a8639f'
   },
   { 
     name: 'Walmart', 
-    pyusdAddress: '0x6Bd07000C5F746af69BEe7f151eb30285a6678B2',
+    pyusdAddress: '0xe3B24b93C18eD1B7eEa9e07b3B03D03259f3942e',
     flowAddress: '0xecb8d6f1b3a8639f'
   },
   { 
     name: 'FlowStore', 
-    pyusdAddress: '0x6Bd07000C5F746af69BEe7f151eb30285a6678B2',
+    pyusdAddress: '0xe3B24b93C18eD1B7eEa9e07b3B03D03259f3942e',
     flowAddress: '0xecb8d6f1b3a8639f'
   },
 ];

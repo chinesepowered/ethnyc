@@ -20,37 +20,88 @@ export async function POST(request: Request) {
       );
     }
     
-    // For L2 optimistic resolution, we need both L1 and L2 providers
+    // For L2 ENS resolution, we need both L1 and L2 providers
     const l1Provider = new ethers.JsonRpcProvider(
-      process.env.SEPOLIA_RPC_URL || 'https://rpc.sepolia.org'
+      process.env.SEPOLIA_RPC_URL || 'https://sepolia.drpc.org'
     );
     
     const l2Provider = new ethers.JsonRpcProvider(
       process.env.ARBITRUM_SEPOLIA_RPC_URL || 'https://sepolia-rollup.arbitrum.io/rpc'
     );
     
-    // Get coin type for the chain
-    const coinType = evmChainIdToCoinType(chainId);
+    // Set a 10-second timeout for ENS resolution
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('ENS resolution timeout')), 10000)
+    );
     
     try {
-      // First, try to get the reverse resolver for the L2 chain
+      // Get coin type for Arbitrum Sepolia
+      const coinType = evmChainIdToCoinType(chainId);
       const reverseNamespace = `${coinType.toString(16)}.reverse`;
       
-      // Use L1 provider to resolve the reverse resolver
-      const chainReverseResolver = await l1Provider.resolveName(reverseNamespace);
+      console.log(`Resolving ENS for ${address} on L2 chain ${chainId}, namespace: ${reverseNamespace}`);
       
-      if (!chainReverseResolver || chainReverseResolver === ethers.ZeroAddress) {
-        // Fallback: Try direct resolution on L2
-        const l2ReverseRegistrar = '0xa0E1cBa4FE786118c0abb1Dbeb32f007234f692d'; // Arbitrum Sepolia reverse registrar
+      // Try to get the reverse resolver for the L2 chain from L1
+      const chainReverseResolver = await Promise.race([
+        l1Provider.getResolver(reverseNamespace),
+        timeoutPromise
+      ]) as any;
+      
+      if (!chainReverseResolver || chainReverseResolver.address === ethers.ZeroAddress) {
+        console.log('No reverse resolver found for L2 chain');
         
-        try {
+        // Fallback: Try standard ENS resolution on L1
+        const ensName = await Promise.race([
+          l1Provider.lookupAddress(address),
+          timeoutPromise
+        ]) as string | null;
+        
+        if (ensName) {
+          return NextResponse.json({
+            success: true,
+            ensName: ensName,
+            address,
+            chainId,
+            method: 'l1-fallback'
+          });
+        }
+        
+        return NextResponse.json({
+          success: false,
+          message: 'No ENS name found'
+        });
+      }
+      
+      // Get the L2 registrar address
+      try {
+        const l2RegistrarABI = ['function l2Registrar() view returns (address)'];
+        const l1ResolverContract = new ethers.Contract(
+          chainReverseResolver.address, 
+          l2RegistrarABI, 
+          l1Provider
+        );
+        
+        const l2Registrar = await Promise.race([
+          l1ResolverContract.l2Registrar(),
+          timeoutPromise
+        ]) as string;
+        
+        if (l2Registrar && l2Registrar !== ethers.ZeroAddress) {
+          // Read the name from L2
           const nameForAddrABI = ['function nameForAddr(address) view returns (string)'];
-          const l2Contract = new ethers.Contract(l2ReverseRegistrar, nameForAddrABI, l2Provider);
-          const reverseName = await l2Contract.nameForAddr(address);
+          const l2Contract = new ethers.Contract(l2Registrar, nameForAddrABI, l2Provider);
+          
+          const reverseName = await Promise.race([
+            l2Contract.nameForAddr(address),
+            timeoutPromise
+          ]) as string;
           
           if (reverseName && reverseName !== '') {
-            // Verify forward resolution matches
-            const forwardAddr = await l1Provider.resolveName(reverseName);
+            // Verify forward resolution matches using L1
+            const forwardAddr = await Promise.race([
+              l1Provider.resolveName(reverseName),
+              timeoutPromise
+            ]) as string | null;
             
             if (forwardAddr && forwardAddr.toLowerCase() === address.toLowerCase()) {
               return NextResponse.json({
@@ -63,70 +114,46 @@ export async function POST(request: Request) {
               });
             }
           }
-        } catch (l2Error) {
-          console.log('L2 reverse resolution failed:', l2Error);
         }
-      } else {
-        // Get the L2 registrar address from the L1 resolver
-        const l2RegistrarABI = ['function l2Registrar() view returns (address)'];
-        const l1ResolverContract = new ethers.Contract(chainReverseResolver, l2RegistrarABI, l1Provider);
-        
-        try {
-          const l2Registrar = await l1ResolverContract.l2Registrar();
-          
-          if (l2Registrar && l2Registrar !== ethers.ZeroAddress) {
-            // Read the name from L2
-            const nameForAddrABI = ['function nameForAddr(address) view returns (string)'];
-            const l2Contract = new ethers.Contract(l2Registrar, nameForAddrABI, l2Provider);
-            const reverseName = await l2Contract.nameForAddr(address);
-            
-            if (reverseName && reverseName !== '') {
-              // Verify forward resolution matches
-              const forwardAddr = await l1Provider.resolveName(reverseName);
-              
-              if (forwardAddr && forwardAddr.toLowerCase() === address.toLowerCase()) {
-                return NextResponse.json({
-                  success: true,
-                  ensName: reverseName,
-                  address,
-                  chainId,
-                  coinType,
-                  method: 'l2-optimistic-resolver'
-                });
-              }
-            }
-          }
-        } catch (resolverError) {
-          console.log('L1 resolver lookup failed:', resolverError);
-        }
+      } catch (l2Error) {
+        console.log('L2 registrar lookup failed:', l2Error);
       }
       
-      // If all L2 methods fail, try standard L1 resolution as fallback
-      const primaryName = await l1Provider.lookupAddress(address);
+      // Final fallback: Try standard L1 resolution
+      const ensName = await Promise.race([
+        l1Provider.lookupAddress(address),
+        timeoutPromise
+      ]) as string | null;
       
-      if (!primaryName) {
+      if (ensName) {
         return NextResponse.json({
-          success: false,
-          message: 'No ENS name found for this address'
+          success: true,
+          ensName: ensName,
+          address,
+          chainId,
+          method: 'l1-direct'
         });
       }
       
       return NextResponse.json({
-        success: true,
-        ensName: primaryName,
-        address,
-        chainId,
-        coinType,
-        method: 'l1-fallback'
+        success: false,
+        message: 'No ENS name found for this address'
       });
       
     } catch (resolverError: any) {
       console.log('ENS resolution failed:', resolverError.message);
       
-      // Return null if no ENS name found
+      // If timeout, return quickly
+      if (resolverError.message === 'ENS resolution timeout') {
+        return NextResponse.json({
+          success: false,
+          message: 'ENS resolution timed out'
+        });
+      }
+      
       return NextResponse.json({
         success: false,
-        message: 'No ENS name found for this address',
+        message: 'No ENS name found',
         details: resolverError.message
       });
     }
