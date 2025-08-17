@@ -1,4 +1,4 @@
-# 🥽 Vitalik - Voice-Activated Shopping for Smart Glasses
+# 🥽 Vitalik - Personal Smart Glasses Assistant
 
 Transform your smart glasses into an AI-powered shopping assistant that understands what you're looking at and handles cryptocurrency payments with just your voice.
 
@@ -84,8 +84,8 @@ Empowers visually impaired users with voice-guided shopping and audio confirmati
 ## 🌍 Real Transactions
 
 Every purchase is a real blockchain transaction:
-- **Arbitrum Sepolia**: [View on Arbiscan](https://sepolia.arbiscan.io)
-- **Flow Testnet**: [View on Flowscan](https://testnet.flowscan.io)
+- **Arbitrum Sepolia**: [View on Arbiscan](https://sepolia.arbiscan.io/tx/0x4a9d83dc310aa24d10e4dd8f8c1f582f9b84f18815c25d09e422061520658fb3)
+- **Flow Testnet**: [View on Flowscan](https://testnet.flowscan.io/tx/2567a49b676a132231497a0db10bd6bc53a49a91982f715387a5258411f98b1a)
 
 ## 🔮 The Future of Commerce
 
@@ -135,14 +135,6 @@ Currently recognizes and sells:
 - **Electronics**: USB-C Chargers, Phone Chargers, Laptop Chargers
 - **Digital Goods**: Flow NFT Packs, Collectibles
 
-## 🤝 Contributing
-
-We welcome contributions! Whether it's adding new product recognition, supporting additional blockchains, or improving the voice interface, your input helps shape the future of commerce.
-
-## 📜 License
-
-MIT License - build the future with us
-
 ## 🌟 Vision
 
 We believe the future of shopping is:
@@ -152,7 +144,3 @@ We believe the future of shopping is:
 - **Accessible** - Voice-first for everyone
 
 **Vitalik** is more than a shopping assistant - it's a glimpse into a world where technology disappears into the background, leaving only natural human interaction with instant, global, programmable money.
-
----
-
-*Built with ❤️ for the future of AR commerce*

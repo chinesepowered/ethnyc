@@ -2,8 +2,8 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Gemini Live Audio',
-  description: 'Real-time audio chat with Gemini AI',
+  title: 'Vitalik',
+  description: 'AI Smart Glasses Assistant',
 }
 
 export default function RootLayout({
